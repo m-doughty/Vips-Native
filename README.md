@@ -21,6 +21,12 @@ This module is a very minimal FFI wrapper for libvips for smart image resizing (
 
 Pull requests are welcome if you want to add more vips functionality.
 
+You will need vips installed, I refuse to vendor glib.
+
+On MacOS: brew install vips
+
+On Ubuntu: sudo apt install libvips-dev
+
 EXTERNAL API
 ============
 

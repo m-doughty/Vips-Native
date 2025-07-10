@@ -2,6 +2,9 @@ Revision history for Vips::Native
 
 {{$NEXT}}
 
+0.1.2  2025-07-10T15:48:10+01:00
+    - Add vips install info to readme
+
 0.1.1  2025-07-10T15:45:21+01:00
     - Remove windows from test runner, installing vips on github actions is too awkward
 
