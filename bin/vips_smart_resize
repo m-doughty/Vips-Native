@@ -8,6 +8,9 @@ unit sub MAIN (
 
 use Vips::Native;
 
+die "Usage: vips_smart_resize --in=/path/to/image.png --out=/path/to/save.png --width=180 --height=180"
+    unless $in.defined && $out.defined && $width.defined && $height.defined;
+
 say "📸 Resizing image:";
 say "  Input:  $in";
 say "  Output: $out";

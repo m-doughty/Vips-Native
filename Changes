@@ -2,6 +2,10 @@ Revision history for Vips::Native
 
 {{$NEXT}}
 
+0.1.3  2025-07-10T16:06:03+01:00
+    - Document script usage
+    - Make script die with a useful message when params not provided
+
 0.1.2  2025-07-10T15:48:10+01:00
     - Add vips install info to readme
 

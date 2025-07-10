@@ -3,7 +3,7 @@
 NAME
 ====
 
-LLM::Character - Implementation of Character Card v3 characters & lorebooks in Raku
+Vips::Native - Very light vips wrapper for making thumbnails
 
 SYNOPSIS
 ========
@@ -27,6 +27,8 @@ On MacOS: brew install vips
 
 On Ubuntu: sudo apt install libvips-dev
 
+I don't know why the GitHub Actions are failing on MacOS. The library runs on MacOS, that's where I built it.
+
 EXTERNAL API
 ============
 
@@ -36,6 +38,11 @@ Vips::Native
 ### smart-resize(Str $in-path, Str $out-path, Int $out-width, Int $out-height --> Bool)
 
 Takes the input at $in-path, crops it to the right aspect ratio based on attention filter, then resizes to $out-width x $out-height and saves it to $out-path as a PNG.
+
+vips_smart_resize --in=/path/to/image.png --out=/path/to/save.png --width=180 --height=180
+------------------------------------------------------------------------------------------
+
+Also installs a script to resize images as per above.
 
 AUTHOR
 ======
