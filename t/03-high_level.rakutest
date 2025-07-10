@@ -1,0 +1,13 @@
+use Test;
+use lib 'lib';
+
+use Vips::Native;
+
+plan 2;
+
+my $result = smart-resize("t/fixtures/camelia.png", "t/fixtures/out2.png", 128, 128);
+ok $result, "Successfully ran smart-resize";
+
+ok "t/fixtures/out2.png".IO.e, "Image successfully created";
+
+unlink "t/fixtures/out2.png";

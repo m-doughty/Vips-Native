@@ -1,0 +1,29 @@
+{
+  "auth": "zef:apogee",
+  "authors": [
+    "Matt Doughty"
+  ],
+  "build-depends": [
+  ],
+  "depends": [
+    "MacOS::NativeLib"
+  ],
+  "description": "Raku libvips wrapper",
+  "license": "Artistic-2.0",
+  "name": "Vips::Native",
+  "perl": "6.d",
+  "provides": {
+    "Vips::Native": "lib/Vips/Native.rakumod",
+    "Vips::Native::FFI": "lib/Vips/Native/FFI.rakumod"
+  },
+  "resources": [
+  ],
+  "source-url": "https://github.com/m-doughty/Vips-Native.git",
+  "tags": [
+    "vips",
+    "image"
+  ],
+  "test-depends": [
+  ],
+  "version": "0.1.0"
+}

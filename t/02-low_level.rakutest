@@ -1,0 +1,60 @@
+use Test;
+use lib 'lib';
+
+use Vips::Native::FFI;
+use NativeCall;
+
+plan 14;
+
+my $ok = vips_init("vips-test");
+ok $ok == 0, "vips_init returns 0 (success)";
+
+# Load test image
+my $input-path = "t/fixtures/camelia.png";
+ok $input-path.IO.e, "Input PNG exists";
+
+my $img = vips_image_new_from_file($input-path, Str);
+ok $img.defined, "Loaded image from file";
+
+my $width  = vips_image_get_width($img);
+my $height = vips_image_get_height($img);
+is $width, 512,  "Image width is $width";
+is $height, 385, "Image height is $height";
+
+# Smartcrop to 256x256
+my $cropped = CArray[VipsImage].new;
+$cropped[0] = VipsImage;
+my $ret = vips_smartcrop($img, $cropped, 256, 256, "interesting", VIPS_INTERESTING_ATTENTION, Str);
+ok $ret == 0, "vips_smartcrop succeeds";
+ok $cropped[0].defined, "Cropped image is defined";
+
+# Resize (scale 0.5, using LANCZOS3)
+my $resized = CArray[VipsImage].new;
+$resized[0] = VipsImage;
+$ret = vips_resize($cropped[0], $resized, 0.5.Num, "kernel", VIPS_KERNEL_LANCZOS3, Str);
+ok $ret == 0, "vips_resize succeeds";
+ok $resized[0].defined, "Resized image is defined";
+
+# Save as t/fixtures/out.png
+my $out-path = "t/fixtures/out.png";
+$ret = vips_pngsave($resized[0], $out-path, Str);
+ok $ret == 0, "vips_pngsave succeeds";
+ok $out-path.IO.e, "Output file written";
+
+# Ensure we have an image file
+my $img2 = vips_image_new_from_file($out-path, Str);
+ok $img2.defined, "Loaded output image from file";
+
+# Ensure the output is the right dimensions
+my $width2  = vips_image_get_width($img2);
+my $height2 = vips_image_get_height($img2);
+is $width2, 128,  "Output image width is $width2";
+is $height2, 128, "Output image height is $height2";
+
+# Cleanup memory
+g_object_unref($img);
+g_object_unref($cropped[0]);
+g_object_unref($resized[0]);
+g_object_unref($img2);
+
+unlink($out-path);

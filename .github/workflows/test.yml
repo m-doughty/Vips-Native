@@ -1,0 +1,48 @@
+name: test
+
+on:
+  push:
+    branches:
+      - '*'
+    tags-ignore:
+      - '*'
+  pull_request:
+
+jobs:
+  raku:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+        raku-version:
+          - 'latest'
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Raku/setup-raku@v1
+        with:
+          raku-version: ${{ matrix.raku-version }}
+      - name: Install libvips
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            sudo apt update
+            sudo apt install -y libvips-dev
+          elif [[ "$RUNNER_OS" == "macOS" ]]; then
+            brew install vips
+          elif [[ "$RUNNER_OS" == "Windows" ]]; then
+            curl -LO https://github.com/msys2/msys2-installer/releases/download/2023-07-11/msys2-x86_64-20230711.exe
+            ./msys2-x86_64-*.exe /S
+            export PATH="/c/msys64/usr/bin:$PATH"
+            pacman -Sy --noconfirm vips
+            echo '/c/msys64/usr/bin' >> $GITHUB_PATH
+          fi
+      - name: Install Dependencies
+        run: zef install --/test --test-depends --deps-only .
+      - name: Install App::Prove6
+        run: zef install --/test App::Prove6
+      - name: Run Tests
+        run: prove6 -I. t
