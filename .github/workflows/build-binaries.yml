@@ -41,9 +41,12 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          BINARY_TAG="$(tr -d '[:space:]' < BINARY_TAG)"
+          # head -n1 + tr handles both CRLF (Windows checkout) and
+          # any accidental trailing whitespace.
+          BINARY_TAG="$(head -n1 BINARY_TAG | tr -d '[:space:]')"
           if [[ -z "$BINARY_TAG" ]]; then
             echo "❌ BINARY_TAG empty / missing."
+            ls -la BINARY_TAG || true
             exit 1
           fi
           # If triggered by tag push, sanity-check the pushed tag
@@ -57,6 +60,13 @@ jobs:
             fi
           fi
           VIPS_VERSION="$(echo "$BINARY_TAG" | sed -E 's/^binaries-vips-(.+)-r[0-9]+$/\1/')"
+          # Fail loud if the parse produced empty — better than letting
+          # a downstream step try to download `vips-dev-w64-all-.zip`.
+          if [[ -z "$VIPS_VERSION" || "$VIPS_VERSION" == "$BINARY_TAG" ]]; then
+            echo "❌ Could not parse vips version from BINARY_TAG='$BINARY_TAG'."
+            echo "   Expected format: binaries-vips-<version>-r<N>"
+            exit 1
+          fi
           echo "vips_version=$VIPS_VERSION" >> "$GITHUB_OUTPUT"
           echo "binary_tag=$BINARY_TAG"     >> "$GITHUB_OUTPUT"
 
@@ -134,7 +144,8 @@ jobs:
           set -euxo pipefail
           artifact="vips-macos-arm64.tar.gz"
           tar -czf "$artifact" -C bundle .
-          sha256sum "$artifact" | tee "${artifact}.sha256"
+          # macOS ships shasum (BSD) not sha256sum (GNU coreutils).
+          shasum -a 256 "$artifact" | tee "${artifact}.sha256"
           mkdir -p artefacts
           mv "$artifact" "${artifact}.sha256" artefacts/
 
