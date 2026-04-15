@@ -145,7 +145,11 @@ sub _configure-runtime-env() {
         # SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_USER_DIRS)).
         {
             use NativeCall;
-            my sub SetDllDirectoryW(Str is encoded('utf-16'))
+            # NativeCall encoding name is `utf16` (no dash). The W
+            # (wide) variant takes UTF-16LE on Windows — which is
+            # what Raku's `utf16` marshals to on little-endian hosts
+            # (every Windows target we support is LE).
+            my sub SetDllDirectoryW(Str is encoded('utf16'))
                 returns int32 is native('kernel32') { * };
             SetDllDirectoryW($lib-str);
         }
