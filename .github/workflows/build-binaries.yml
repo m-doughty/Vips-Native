@@ -502,11 +502,17 @@ jobs:
           fi
 
           echo "--- bundle/ (top-level) ---"
-          ls -la bundle/ | head -50
+          ls -la bundle/
           echo "(total top-level: $(find bundle -maxdepth 1 -type f | wc -l) files)"
           echo "--- bundle/vips-modules/ ---"
-          ls -la bundle/vips-modules/ | head -50
+          ls -la bundle/vips-modules/
           echo "(total modules: $(find bundle/vips-modules -type f | wc -l) files)"
+          # Explicit sanity check — the sibling-DLL path fix is useless
+          # if the entry-point DLL itself isn't in the bundle.
+          if [[ ! -f bundle/libvips-42.dll ]]; then
+              echo "❌ libvips-42.dll not staged — top-level copy regression."
+              exit 1
+          fi
 
       - name: Package archive
         run: |
