@@ -40,15 +40,21 @@ jobs:
       - name: Install system deps
         run: |
           apt-get update
-          # libvips42 is Focal's system libvips (8.9.x — old, but fine
-          # for proving the fallback-to-system path works end-to-end).
-          # libvips-dev pulls in the pkg-config + headers; not strictly
-          # needed for FFI-only use, but keeps glib-2.0 / gobject-2.0
-          # symlinks sane.
+          # Focal's stock libvips42 is 8.9.2 (2020) — the test suite
+          # expects modern API behaviour and would fail for reasons
+          # unrelated to the glibc fallback. Install from Lovell
+          # Fuller's PPA (maintainer of sharp.js), which backports
+          # current libvips to older Ubuntu LTS releases.
           apt-get install -y --no-install-recommends \
               build-essential curl ca-certificates git \
-              libvips42 libvips-dev
+              software-properties-common gnupg
+          add-apt-repository -y ppa:lovell/libvips
+          apt-get update
+          apt-get install -y --no-install-recommends libvips42 libvips-dev
           ldd --version
+          # Log the libvips version we resolved so future failures
+          # are easy to correlate with a specific PPA build.
+          dpkg -s libvips42 | grep -i '^version'
 
       - uses: actions/checkout@v4
 
