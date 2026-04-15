@@ -312,10 +312,18 @@ jobs:
           retention-days: 14
 
   # ---------------------------------------------------------------
-  # Windows x86_64 — libvips/build-win64-mxe official prebuilt
+  # Windows x86_64 + arm64 — libvips/build-win64-mxe official prebuilt
   # ---------------------------------------------------------------
   build-windows:
-    name: build-windows-x86_64
+    name: build-${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-x86_64
+            mxe-arch: x64
+          - platform: windows-arm64
+            mxe-arch: arm64
     runs-on: windows-2022
     timeout-minutes: 20
     defaults:
@@ -356,25 +364,18 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euxo pipefail
-          # build-win64-mxe ships zips named like:
-          #   vips-dev-w64-all-8.15.5.zip   (full build, all formats)
-          #   vips-dev-w64-web-8.15.5.zip   (web only)
-          # We want -all for the heif/avif/openslide formats. The
-          # repo exposes them as GitHub releases on libvips/build-win64-mxe.
-          ZIP="vips-dev-w64-all-${{ steps.vars.outputs.vips_version }}.zip"
+          # build-win64-mxe asset naming:
+          #   vips-dev-x64-all-<version>.zip      (Windows x86_64, all formats)
+          #   vips-dev-arm64-all-<version>.zip    (Windows arm64,  all formats)
+          # The "-all" variant carries heif/avif/openslide/etc; the
+          # "-web" variants are stripped down. Tag scheme is v<version>.
+          ZIP="vips-dev-${{ matrix.mxe-arch }}-all-${{ steps.vars.outputs.vips_version }}.zip"
           gh release download "v${{ steps.vars.outputs.vips_version }}" \
               --repo libvips/build-win64-mxe \
               --pattern "$ZIP" \
               --output "$ZIP"
-          # Zip extracts to vips-dev-<version>/ with bin/ + lib/ +
-          # include/ + share/. We want bin/*.dll (all libs ship as
-          # DLLs in bin/ on this layout, not lib/).
           unzip -q "$ZIP"
-          extract_dir="vips-dev-${{ steps.vars.outputs.vips_version }}"
-          if [[ ! -d "$extract_dir" ]]; then
-            # Some versions name the top-level dir vips-dev-X.Y instead.
-            extract_dir=$(ls -d vips-dev-* | head -1)
-          fi
+          extract_dir=$(ls -d vips-dev-* | head -1)
           echo "EXTRACT_DIR=$extract_dir" >> "$GITHUB_ENV"
 
       - name: Stage DLLs
@@ -383,8 +384,7 @@ jobs:
           mkdir -p bundle
           # Sibling-DLL search means we just copy every DLL the
           # upstream zip ships — they're all already designed to
-          # live in the same dir. Skip executables (vips.exe, vipsedit
-          # .exe etc) — we only want the library set.
+          # live in the same dir. Skip the .exe / headers / pkgconfig.
           cp "$EXTRACT_DIR"/bin/*.dll bundle/
 
           echo "--- bundle contents ---"
@@ -394,7 +394,7 @@ jobs:
       - name: Package archive
         run: |
           set -euxo pipefail
-          artifact="vips-windows-x86_64.zip"
+          artifact="vips-${{ matrix.platform }}.zip"
           (cd bundle && 7z a "../$artifact" .)
           sha256sum "$artifact" | tee "${artifact}.sha256"
           mkdir -p artefacts
@@ -402,7 +402,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: vips-windows-x86_64
+          name: vips-${{ matrix.platform }}
           path: artefacts/
           retention-days: 14
 

@@ -49,15 +49,16 @@ class Build {
         'https://github.com/m-doughty/Vips-Native/releases/download';
 
     # Map (OS, hardware) → platform slug used in release artefact
-    # filenames + cache paths. Windows arm64 deliberately not mapped —
-    # libvips/build-win64-mxe doesn't ship arm64 yet, so those users
-    # fall through to the system-libvips path.
+    # filenames + cache paths. All five platforms covered by upstream
+    # build-win64-mxe / Homebrew / conda-forge prebuilts.
     my %PLATFORM-SLUGS =
         'darwin-arm64'    => 'macos-arm64',
         'linux-x86_64'    => 'linux-x86_64-glibc',
         'linux-aarch64'   => 'linux-aarch64-glibc',
         'win32-x86_64'    => 'windows-x86_64',
+        'win32-aarch64'   => 'windows-arm64',
         'mswin32-x86_64'  => 'windows-x86_64',
+        'mswin32-aarch64' => 'windows-arm64',
     ;
 
     # --- Entry point ----------------------------------------------------
