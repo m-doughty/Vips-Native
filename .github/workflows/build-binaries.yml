@@ -21,15 +21,6 @@ name: build-binaries
 
 on:
   workflow_dispatch:
-    inputs:
-      vips_version:
-        description: 'libvips version to repackage (e.g. 8.15.5)'
-        required: true
-        default: '8.15.5'
-      recipe_rev:
-        description: 'Recipe revision (bump on workflow changes for the same vips version)'
-        required: true
-        default: '1'
   push:
     tags:
       - 'binaries-vips-*'
@@ -45,21 +36,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Resolve version + tag
+      - name: Resolve version + tag from BINARY_TAG
         id: vars
+        shell: bash
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            VIPS_VERSION="${{ github.event.inputs.vips_version }}"
-            RECIPE_REV="${{ github.event.inputs.recipe_rev }}"
-          else
-            # Tag form: binaries-vips-<version>-r<rev>
-            tag="${GITHUB_REF#refs/tags/}"
-            VIPS_VERSION="$(echo "$tag" | sed -E 's/^binaries-vips-(.+)-r[0-9]+$/\1/')"
-            RECIPE_REV="$(echo "$tag" | sed -E 's/^binaries-vips-.+-r([0-9]+)$/\1/')"
+          set -euxo pipefail
+          BINARY_TAG="$(tr -d '[:space:]' < BINARY_TAG)"
+          if [[ -z "$BINARY_TAG" ]]; then
+            echo "❌ BINARY_TAG empty / missing."
+            exit 1
           fi
-          BINARY_TAG="binaries-vips-${VIPS_VERSION}-r${RECIPE_REV}"
+          # If triggered by tag push, sanity-check the pushed tag
+          # matches the file. Stops a stale checkout from publishing
+          # under the wrong tag.
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            pushed="${GITHUB_REF#refs/tags/}"
+            if [[ "$pushed" != "$BINARY_TAG" ]]; then
+              echo "❌ Pushed tag '$pushed' doesn't match BINARY_TAG '$BINARY_TAG'."
+              exit 1
+            fi
+          fi
+          VIPS_VERSION="$(echo "$BINARY_TAG" | sed -E 's/^binaries-vips-(.+)-r[0-9]+$/\1/')"
           echo "vips_version=$VIPS_VERSION" >> "$GITHUB_OUTPUT"
-          echo "binary_tag=$BINARY_TAG"   >> "$GITHUB_OUTPUT"
+          echo "binary_tag=$BINARY_TAG"     >> "$GITHUB_OUTPUT"
 
       - name: Install vips via Homebrew
         run: |
@@ -72,10 +71,14 @@ jobs:
           brew install vips dylibbundler
           INSTALLED=$(brew list --versions vips | awk '{print $2}')
           REQUESTED='${{ steps.vars.outputs.vips_version }}'
-          if [[ "$INSTALLED" != "$REQUESTED"* ]]; then
-            echo "❌ Homebrew installed vips $INSTALLED but workflow requested $REQUESTED."
-            echo "   Either bump the workflow input to match Homebrew's current version,"
-            echo "   or pin via 'brew tap-new' / explicit formula URL."
+          # Homebrew versions sometimes carry a _N revision suffix
+          # (e.g. 8.18.2_1). Compare on the leading MAJOR.MINOR.PATCH
+          # only so a homebrew rebump doesn't break us.
+          INSTALLED_MMP=$(echo "$INSTALLED" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')
+          if [[ "$INSTALLED_MMP" != "$REQUESTED" ]]; then
+            echo "❌ Homebrew installed vips $INSTALLED ($INSTALLED_MMP) but workflow"
+            echo "   requested $REQUESTED. Bump BINARY_TAG to match Homebrew's"
+            echo "   current version, or pin via an explicit formula URL."
             exit 1
           fi
 
@@ -216,10 +219,25 @@ jobs:
             local key="$(basename "$lib")"
             [[ -n "${SEEN[$key]:-}" ]] && return 0
             SEEN[$key]=1
-            ldd "$lib" 2>/dev/null \
+            # LD_LIBRARY_PATH so ldd resolves transitive deps via the
+            # conda env first, not whatever the runner happens to
+            # have system-installed. Without this, glib/gobject etc
+            # come from /lib/aarch64-linux-gnu and get skipped as
+            # "system libs" — bundle ships missing its core deps.
+            LD_LIBRARY_PATH="$ENV_LIB:${LD_LIBRARY_PATH:-}" \
+              ldd "$lib" 2>/dev/null \
               | sed -nE 's/^[[:space:]]*([^ ]+) => ([^ ]+) .*/\1\t\2/p' \
               | while IFS=$'\t' read -r name path; do
                   [[ -z "$path" ]] && continue
+                  # `=> not found` parses as path="not" — skip cleanly.
+                  # Anything starting with `not` (followed by whitespace
+                  # in the original ldd output) is one of these.
+                  [[ "$path" == "not" ]] && {
+                    echo "WARN: $name unresolved by ldd ('not found') — skipping"
+                    continue
+                  }
+                  # Path must be absolute + a real file.
+                  [[ "$path" != /* || ! -f "$path" ]] && continue
                   # Skip system libs — these stay dynamic.
                   case "$path" in
                     /lib/*|/lib64/*|/usr/lib/*|/usr/lib64/*) continue ;;
@@ -365,14 +383,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Resolve tag
+      - name: Resolve tag from BINARY_TAG
         id: vars
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            BINARY_TAG="binaries-vips-${{ github.event.inputs.vips_version }}-r${{ github.event.inputs.recipe_rev }}"
-          else
-            BINARY_TAG="${GITHUB_REF#refs/tags/}"
-          fi
+          set -euxo pipefail
+          BINARY_TAG="$(tr -d '[:space:]' < BINARY_TAG)"
+          [[ -z "$BINARY_TAG" ]] && { echo "❌ BINARY_TAG empty"; exit 1; }
           echo "binary_tag=$BINARY_TAG" >> "$GITHUB_OUTPUT"
 
       - uses: actions/download-artifact@v4
