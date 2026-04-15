@@ -2,6 +2,40 @@ Revision history for Vips::Native
 
 {{$NEXT}}
 
+0.2.2  2026-04-16T00:29:10+01:00
+    - Fix macOS + Windows test failures against the
+      binaries-vips-8.18.2-r1 archives by reworking the bundle
+      layout and adding runtime env setup.
+        * macOS: libvips 8.15+ splits format loaders (pngload,
+          jpegload, heifload, …) into dlopen'd modules under
+          $VIPS_MODULEDIR. dylibbundler only follows link-time
+          deps so these never made it into the r1 bundle; libvips
+          loaded fine, but vips_image_new_from_file() silently
+          returned NULL on every format. build-binaries.yml now
+          stages $VIPS_CELLAR/lib/vips-modules-*/ into
+          bundle/vips-modules/, rebundles each module's refs via
+          `dylibbundler -p '@loader_path/../'`, and codesigns them.
+        * Windows: NativeCall loads libvips-42.dll by absolute
+          path, which makes Windows resolve libvips's own DLL
+          deps starting from raku.exe's directory rather than
+          libvips-42.dll's — so every sibling DLL in the staged
+          lib dir was invisible and libvips-42.dll failed to
+          load with ERROR_MOD_NOT_FOUND (0x7e). FFI.rakumod now
+          prepends the staged lib dir to %*ENV<PATH> at module
+          load time (before any `is native(...)` binding fires).
+          build-binaries.yml also now includes bin/vips-modules/
+          from build-win64-mxe, which the r1 copy-glob missed.
+        * All platforms: FFI.rakumod sets %*ENV<VIPS_MODULEDIR>
+          to <staged>/vips-modules when the dir exists. No-op on
+          the conda-forge Linux build (loaders baked in), load-
+          bearing on macOS/Windows, forward-compatible if any
+          future Linux bundle source switches to split modules.
+          Respects VIPS_NATIVE_LIB_DIR / VIPS_MODULEDIR overrides.
+    - BINARY_TAG bumped to binaries-vips-8.18.2-r2 to force a
+      re-download; r1 archives remain broken and should not be
+      used. resources/checksums.txt will refresh on the next
+      release.
+
 0.2.1  2026-04-16T00:01:51+01:00
     - Build.rakumod: detect system glibc via `ldd --version` and
       skip the prebuilt download when it's older than the prebuilt

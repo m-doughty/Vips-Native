@@ -119,13 +119,70 @@ jobs:
               -s "$BREW_PREFIX/opt/gettext/lib" \
               -s "$BREW_PREFIX/opt/libffi/lib"
 
+          # vips 8.15+ splits format loaders (pngload, jpegload,
+          # heifload, webpsave, …) into separately-dlopen'd modules
+          # under $VIPS_CELLAR/lib/vips-modules-<abi>/. dylibbundler
+          # only follows link-time deps, so without an explicit copy
+          # the bundle ships with a libvips that can't open any
+          # image formats — vips_image_new_from_file() silently
+          # returns NULL. Stage the modules alongside libvips and
+          # rebundle their own inter-lib refs so they find the
+          # bundled libvips via @loader_path/../.
+          MODULES_SRC=$(find "$VIPS_CELLAR/lib" -maxdepth 1 -type d \
+              -name 'vips-modules-*' | head -n1)
+          if [[ -z "$MODULES_SRC" ]]; then
+              # Static-loader vips would render this a no-op; we
+              # haven't seen Homebrew ship that variant, so treat
+              # the missing dir as a Homebrew-layout regression
+              # worth halting the build over rather than silently
+              # producing a broken bundle.
+              echo "❌ No vips-modules-* dir found under $VIPS_CELLAR/lib."
+              echo "   Homebrew-provided libvips is expected to split format"
+              echo "   loaders into modules from 8.15+. Bundle would be"
+              echo "   unable to open any image format — failing hard."
+              ls -la "$VIPS_CELLAR/lib"
+              exit 1
+          fi
+          mkdir -p bundle/vips-modules
+          cp "$MODULES_SRC"/*.so bundle/vips-modules/
+
+          # Rebundle each module: inter-lib refs today point at
+          # @rpath/libvips.42.dylib (and libglib / libgobject). Once
+          # installed under bundle/vips-modules/, they need to
+          # resolve back up to bundle/ via @loader_path/../.
+          # dylibbundler -p sets the install-name prefix used for
+          # rewritten refs; -d writes any newly-discovered deps into
+          # the same bundle/ dir (dylibbundler -d is shared with the
+          # libvips pass above so duplicates get deduped on copy).
+          for mod in bundle/vips-modules/*.so; do
+              [[ -L "$mod" ]] && continue
+              dylibbundler \
+                  -of \
+                  -b \
+                  -x "$mod" \
+                  -d bundle \
+                  -p '@loader_path/../' \
+                  -s "$BREW_PREFIX/lib" \
+                  -s "$BREW_PREFIX/opt/glib/lib" \
+                  -s "$BREW_PREFIX/opt/gettext/lib" \
+                  -s "$BREW_PREFIX/opt/libffi/lib"
+          done
+
           # Codesign — dylibbundler's install_name_tool calls
           # invalidate the linker-emitted ad-hoc signature. macOS
           # Sequoia kernel SIGKILLs on tainted page access without
           # a valid sig. Same fix as Notcurses-Native.
           find bundle -name '*.dylib' -type f ! -type l \
             -exec codesign --force --sign - --timestamp=none {} \;
+          # Format-loader modules are .so on macOS (glib's
+          # GIOModule convention) — sign them too, same reason.
+          find bundle/vips-modules -name '*.so' -type f ! -type l \
+            -exec codesign --force --sign - --timestamp=none {} \;
           for f in bundle/*.dylib; do
+            [[ -L "$f" ]] && continue
+            codesign --verify "$f" || { echo "❌ $f failed verify"; exit 1; }
+          done
+          for f in bundle/vips-modules/*.so; do
             [[ -L "$f" ]] && continue
             codesign --verify "$f" || { echo "❌ $f failed verify"; exit 1; }
           done
@@ -382,14 +439,42 @@ jobs:
         run: |
           set -euxo pipefail
           mkdir -p bundle
-          # Sibling-DLL search means we just copy every DLL the
-          # upstream zip ships — they're all already designed to
-          # live in the same dir. Skip the .exe / headers / pkgconfig.
+          # Sibling-DLL search at runtime (enabled by FFI.rakumod
+          # prepending the staged lib dir to PATH before LoadLibrary)
+          # means we just copy every top-level DLL the upstream zip
+          # ships — they're all designed to live in the same dir.
+          # Skip the .exe / headers / pkgconfig.
           cp "$EXTRACT_DIR"/bin/*.dll bundle/
 
-          echo "--- bundle contents ---"
+          # vips 8.15+ splits format loaders (pngload, jpegload,
+          # heifload, webpsave, …) into separately-dlopen'd modules.
+          # build-win64-mxe ships these under bin/vips-modules/; they
+          # don't match the top-level *.dll glob above, so without
+          # an explicit copy the bundle ships with a libvips that
+          # can't open any image format. FFI.rakumod sets
+          # VIPS_MODULEDIR to <staged-lib>/vips-modules at load time
+          # so libvips finds them here.
+          if [[ -d "$EXTRACT_DIR/bin/vips-modules" ]]; then
+              mkdir -p bundle/vips-modules
+              cp "$EXTRACT_DIR"/bin/vips-modules/*.dll bundle/vips-modules/
+          else
+              # Static-loader vips would make this a no-op, but
+              # build-win64-mxe has used split modules since 8.15+;
+              # a missing dir here means upstream has restructured
+              # the zip. Halt rather than publishing an archive that
+              # silently can't open any image format.
+              echo "❌ No vips-modules/ subdir in build-win64-mxe zip."
+              echo "   Upstream layout change? Inspect:"
+              ls -la "$EXTRACT_DIR/bin"
+              exit 1
+          fi
+
+          echo "--- bundle/ (top-level) ---"
           ls -la bundle/ | head -50
-          echo "(total: $(ls bundle/ | wc -l) files)"
+          echo "(total top-level: $(find bundle -maxdepth 1 -type f | wc -l) files)"
+          echo "--- bundle/vips-modules/ ---"
+          ls -la bundle/vips-modules/ | head -50
+          echo "(total modules: $(find bundle/vips-modules -type f | wc -l) files)"
 
       - name: Package archive
         run: |

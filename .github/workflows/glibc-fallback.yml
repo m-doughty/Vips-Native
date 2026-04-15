@@ -71,13 +71,13 @@ jobs:
           fi
           echo "✅ Build.rakumod correctly routed to system-libvips fallback on old glibc."
 
-      - name: Smoke-test the installed module
-        run: |
-          set -eo pipefail
-          # Prove the FFI resolver can find system libvips + gobject
-          # via the OS loader and vips_init() succeeds. If glibc
-          # detection had silently let a 2.35-compiled prebuilt through,
-          # this would die with "GLIBC_2.34 not found" on load.
-          raku -e 'use Vips::Native::FFI; say vips_init("glibc-fallback") == 0 ?? "ok" !! "fail"' \
-              | tee smoke.out
-          grep -qx ok smoke.out
+      - name: Install App::Prove6
+        run: zef install --/test App::Prove6
+
+      - name: Run unit tests
+        # Same invocation as test.yml — exercises the full suite
+        # against focal's system libvips (8.9.x) via the OS loader.
+        # If glibc detection had silently let a 2.35-compiled prebuilt
+        # through, every native() binding would die at load with
+        # "GLIBC_2.34 not found" rather than resolving the system lib.
+        run: prove6 --verbose -I lib t

@@ -76,6 +76,63 @@ sub _resolve-lib(Str $name, Str $short-name --> Str) {
     $short-name;
 }
 
+#| Runtime env setup for the staged-bundle case. Must run before
+#| NativeCall evaluates the `is native(...)` bindings below, since
+#| the first call through any of them triggers `LoadLibrary` /
+#| `dlopen` on libvips, which in turn resolves libvips's own
+#| dependencies using the then-current environment.
+#|
+#| Two problems we fix here:
+#|
+#|   * Windows DLL search order: when NativeCall loads libvips-42.dll
+#|     by absolute path, Windows resolves libvips's own dep DLLs
+#|     (libglib-2.0-0.dll, libgobject-2.0-0.dll, libintl-8.dll, …)
+#|     starting from the *loading process's* directory (raku.exe),
+#|     not from libvips-42.dll's directory. Linux's `$ORIGIN` rpath
+#|     has no equivalent here. Prepending the staged lib dir to
+#|     PATH makes the sibling DLLs findable. (No-op on macOS/Linux
+#|     — @loader_path / $ORIGIN handles sibling lookup natively.)
+#|
+#|   * libvips 8.15+ format loaders (pngload, jpegload, heifload, …)
+#|     live as separately-dlopen'd modules under $VIPS_MODULEDIR.
+#|     Homebrew and build-win64-mxe both ship the split layout;
+#|     conda-forge's Linux build still has loaders baked into
+#|     libvips.so.42, which is why Linux passes the full test suite
+#|     without this env set. We point VIPS_MODULEDIR at the sibling
+#|     vips-modules dir in the bundle — harmless on builds where it
+#|     doesn't exist, load-bearing on the ones where it does.
+sub _configure-runtime-env() {
+    # Respect $VIPS_NATIVE_LIB_DIR override — user pointed us at a
+    # custom vips install and takes responsibility for its env.
+    return if %*ENV<VIPS_NATIVE_LIB_DIR>;
+
+    my $lib-dir = _staged-lib-dir();
+    return without $lib-dir;
+    return unless $lib-dir.d;
+
+    if $*DISTRO.is-win {
+        my $current = %*ENV<PATH> // '';
+        my $lib-str = $lib-dir.Str;
+        # Skip the prepend if it's already first on PATH (idempotent
+        # across reloads / nested `use`s).
+        unless $current.starts-with("$lib-str;") || $current eq $lib-str {
+            %*ENV<PATH> = "$lib-str;$current";
+        }
+    }
+
+    # Bundle layout: $lib-dir holds libvips + its siblings; format
+    # loader plugins live in $lib-dir/vips-modules/ (child, not
+    # sibling — the tarball is extracted into $lib-dir and contains
+    # a top-level vips-modules/ entry). Only set if present — avoids
+    # pointing vips at a non-existent dir, which would make it skip
+    # its default search and miss system-installed modules entirely.
+    my $modules = $lib-dir.add('vips-modules');
+    if $modules.d && !%*ENV<VIPS_MODULEDIR> {
+        %*ENV<VIPS_MODULEDIR> = $modules.Str;
+    }
+}
+_configure-runtime-env();
+
 constant $vips-lib    is export = _resolve-lib('libvips',         'vips');
 constant $gobject-lib is export = _resolve-lib('libgobject-2.0',  'gobject-2.0');
 
