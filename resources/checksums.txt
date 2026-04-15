@@ -29,8 +29,8 @@
 #   Linux x86_64 / arm64  conda-forge libvips package
 #   Windows x86_64        libvips/build-win64-mxe GitHub release
 
-# Pending r1 build — checksums will be filled in after CI publishes
-# the repackaged artefacts for all four platforms. Empty entries
-# here mean Build.rakumod's prebuilt path will fail SHA verify and
-# fall through to system libvips, which is the safe fallback while
-# we wait.
+fae2ff4efec967db21b0ce36ebcf6f6e42226602f4d453eb3d2602d14aad634e  vips-linux-aarch64-glibc.tar.gz
+e527c3943b67cbdfe38e2d1def4aacadc03d9e9a6ffd874ead01616ceb609d3f  vips-linux-x86_64-glibc.tar.gz
+ea6bd0d21a7673104b14dbefd58484648dff9a981515aeb870bc257fa289506a  vips-macos-arm64.tar.gz
+2b4c0f9c67aa5299c02fd7ea0fbc8a0a33a6e7ea8e445cef8838924406931f61  vips-windows-arm64.zip
+631717d44e73c6880169d58716cbb3a61cfb8b980d59612d26579301053219ea  vips-windows-x86_64.zip

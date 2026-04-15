@@ -2,6 +2,54 @@ Revision history for Vips::Native
 
 {{$NEXT}}
 
+0.2.0  2026-04-15T04:11:52+01:00
+    - Prebuilt-binary-first install path. Build.rakumod now attempts
+      to download a per-platform archive from the repo's GitHub
+      Releases (libvips + libgobject + libglib + the format-handling
+      libs for jpeg / png / webp / tiff / gif / heif / avif, all
+      relocated to load via @loader_path / $ORIGIN / sibling-DLL),
+      before falling back to the original behaviour of resolving
+      'vips' and 'gobject-2.0' via the OS dynamic loader from a
+      system-installed libvips.
+    - Sources we repackage from (the trust chain): Homebrew bottle
+      for macOS arm64, conda-forge for Linux x86_64 / aarch64,
+      libvips/build-win64-mxe for Windows x86_64. We don't compile
+      vips ourselves — the upstream sources are reputable and well-
+      tested, and rebuilding vips's dep tree from source in CI
+      would be a maintenance nightmare.
+    - SHA256 verification against bundled resources/checksums.txt;
+      refuses any prebuilt whose hash isn't recorded. Empty /
+      unverifiable hashes fail safe to system-libvips fallback.
+    - Stage native libs to $XDG_DATA_HOME/Vips-Native/<binary-tag>/
+      lib/ (or $LOCALAPPDATA on Windows, ~/.local/share fallback)
+      under their real filenames — NOT into META6 resources, because
+      zef hashes resource filenames and that breaks vips's inter-lib
+      refs (libvips needs libgobject-2.0.0.so next to it on disk by
+      that exact name). Same fix Notcurses-Native uses.
+    - Refactored lib/Vips/Native/FFI.rakumod resolver: env override
+      (VIPS_NATIVE_LIB_DIR) → XDG-staged dir (versioned-aware
+      filename matching) → bare short name for OS dynamic loader.
+      Drops the hard MacOS::NativeLib dependency since the resolver
+      now handles macOS lib lookup itself; macOS users still get
+      Homebrew vips just as cleanly via the fallback path.
+    - New BINARY_TAG file at repo root + resources/BINARY_TAG (the
+      tiny text file that survives zef's resource-hashing intact)
+      as single source of truth for the pinned binary release tag.
+    - New .github/workflows/build-binaries.yml: dispatches per
+      libvips version, downloads from each upstream source, repack-
+      ages with @loader_path / $ORIGIN / sibling-DLL relocation,
+      publishes to GitHub Releases.
+    - Test workflow now exercises both paths: prebuilt-via-zef-
+      install AND a second pass with VIPS_NATIVE_PREFER_SYSTEM=1.
+    - New env knobs: VIPS_NATIVE_PREFER_SYSTEM=1 to skip prebuilt
+      download; VIPS_NATIVE_BINARY_ONLY=1 to refuse the system
+      fallback; VIPS_NATIVE_BINARY_URL to override release base URL;
+      VIPS_NATIVE_CACHE_DIR for download cache; VIPS_NATIVE_DATA_
+      DIR for staged-libs base; VIPS_NATIVE_LIB_DIR for runtime
+      lib-dir override.
+    - All five platforms in the prebuilt matrix: macOS arm64, Linux
+      x86_64 + aarch64 glibc, Windows x86_64 + arm64.
+
 0.1.3  2025-07-10T16:06:03+01:00
     - Document script usage
     - Make script die with a useful message when params not provided
