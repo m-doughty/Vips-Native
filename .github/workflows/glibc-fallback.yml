@@ -40,20 +40,18 @@ jobs:
       - name: Install system deps
         run: |
           apt-get update
-          # Focal's stock libvips42 is 8.9.2 (2020) — the test suite
-          # expects modern API behaviour and would fail for reasons
-          # unrelated to the glibc fallback. Install from Lovell
-          # Fuller's PPA (maintainer of sharp.js), which backports
-          # current libvips to older Ubuntu LTS releases.
+          # Focal's stock libvips42 is 8.9.2 (2020). The tests only
+          # use vips_init / new_from_file / resize / pngsave /
+          # smartcrop — all stable in libvips well before 8.9, so
+          # this version should be adequate. If a future test needs
+          # a newer API, switch to conda-forge libvips in this step
+          # (matches what build-binaries.yml does for Linux prebuilts).
+          # No modern-libvips PPA exists for focal — Lovell Fuller's
+          # backports only cover precise (12.04) and trusty (14.04).
           apt-get install -y --no-install-recommends \
               build-essential curl ca-certificates git \
-              software-properties-common gnupg
-          add-apt-repository -y ppa:lovell/libvips
-          apt-get update
-          apt-get install -y --no-install-recommends libvips42 libvips-dev
+              libvips42 libvips-dev
           ldd --version
-          # Log the libvips version we resolved so future failures
-          # are easy to correlate with a specific PPA build.
           dpkg -s libvips42 | grep -i '^version'
 
       - uses: actions/checkout@v4

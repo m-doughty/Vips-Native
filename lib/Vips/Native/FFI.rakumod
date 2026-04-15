@@ -111,12 +111,43 @@ sub _configure-runtime-env() {
     return unless $lib-dir.d;
 
     if $*DISTRO.is-win {
-        my $current = %*ENV<PATH> // '';
         my $lib-str = $lib-dir.Str;
-        # Skip the prepend if it's already first on PATH (idempotent
-        # across reloads / nested `use`s).
+
+        # Belt: prepend to PATH so any loader search that consults
+        # it (including third-party tools / subprocess spawns) sees
+        # the staged lib dir.
+        my $current = %*ENV<PATH> // '';
         unless $current.starts-with("$lib-str;") || $current eq $lib-str {
             %*ENV<PATH> = "$lib-str;$current";
+        }
+
+        # Braces: Raku's `%*ENV` writes go through the CRT
+        # (`_putenv`), which on some Windows + CRT combinations
+        # doesn't propagate to `GetEnvironmentVariableW` — the
+        # function the Win32 loader consults when resolving
+        # dependent DLLs during LoadLibrary(absolute-path). Call
+        # kernel32's SetDllDirectoryW directly so the loader
+        # definitely sees our staged dir regardless of CRT state.
+        #
+        # kernel32.dll is pre-loaded in every Windows process, so
+        # `is native('kernel32')` resolves cheaply without a
+        # disk probe. Using the W (wide) variant because the CI
+        # runner's home path is pure ASCII today, but end users'
+        # paths (especially %LOCALAPPDATA%) routinely contain
+        # non-ASCII when accounts have accented names.
+        #
+        # SetDllDirectory's semantics: it *replaces* the "extra"
+        # DLL search entry (Win32 supports one at a time, not a
+        # list). This module is the only thing in the process that
+        # touches it, so replace is fine; if a future module also
+        # wants to set it, switch to AddDllDirectory
+        # (Windows 8+ only, additive, paired with
+        # SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_USER_DIRS)).
+        {
+            use NativeCall;
+            my sub SetDllDirectoryW(Str is encoded('utf-16'))
+                returns int32 is native('kernel32') { * };
+            SetDllDirectoryW($lib-str);
         }
     }
 
