@@ -1,0 +1,83 @@
+name: glibc-fallback
+
+# Verifies that Build.rakumod correctly detects a system glibc older
+# than the prebuilt target ($MIN-GLIBC = 2.35, matching ubuntu-22.04)
+# and short-circuits to the system-libvips fallback instead of
+# downloading a prebuilt archive that would fail to load at runtime.
+#
+# Unlike Tokenizers / Notcurses-Native / CRoaring, Vips-Native has no
+# source-build path — the upstream dep tree is too large for a useful
+# Build-time compile. The degraded-mode behaviour on platforms without
+# a prebuilt is to let Native.rakumod resolve libvips via the OS
+# dynamic loader at first FFI call. This workflow asserts the
+# glibc guard routes us there instead of to the broken prebuilt.
+#
+# GitHub dropped ubuntu-20.04 hosted runners in April 2025, so we use
+# a container on ubuntu-latest instead. The ubuntu:20.04 container
+# ships glibc 2.31 — comfortably below the 2.35 floor.
+
+on:
+  push:
+    branches:
+      - '*'
+    tags-ignore:
+      - '*'
+  pull_request:
+
+jobs:
+  ubuntu-20-04-fallback:
+    name: Ubuntu 20.04 (glibc 2.31) → system-libvips fallback
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:20.04
+    defaults:
+      run:
+        shell: bash
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      NO_COLOR: '1'
+    steps:
+      - name: Install system deps
+        run: |
+          apt-get update
+          # libvips42 is Focal's system libvips (8.9.x — old, but fine
+          # for proving the fallback-to-system path works end-to-end).
+          # libvips-dev pulls in the pkg-config + headers; not strictly
+          # needed for FFI-only use, but keeps glib-2.0 / gobject-2.0
+          # symlinks sane.
+          apt-get install -y --no-install-recommends \
+              build-essential curl ca-certificates git \
+              libvips42 libvips-dev
+          ldd --version
+
+      - uses: actions/checkout@v4
+
+      - uses: Raku/setup-raku@v1
+        with:
+          raku-version: 'latest'
+
+      - name: Install module (capture build log)
+        run: |
+          set -eo pipefail
+          zef install --/test --verbose . 2>&1 | tee build.log
+
+      - name: Assert system-libvips fallback message appeared
+        run: |
+          if ! grep -F 'Native.rakumod will fall back to system libvips' build.log; then
+              echo "❌ Expected glibc-fallback message not found in build log."
+              echo "---- build.log tail ----"
+              tail -100 build.log
+              exit 1
+          fi
+          echo "✅ Build.rakumod correctly routed to system-libvips fallback on old glibc."
+
+      - name: Smoke-test the installed module
+        run: |
+          set -eo pipefail
+          # Prove the FFI resolver can find system libvips + gobject
+          # via the OS loader and vips_init() succeeds. If glibc
+          # detection had silently let a 2.35-compiled prebuilt through,
+          # this would die with "GLIBC_2.34 not found" on load.
+          raku -e 'use Vips::Native::FFI; say vips_init("glibc-fallback") == 0 ?? "ok" !! "fail"' \
+              | tee smoke.out
+          grep -qx ok smoke.out

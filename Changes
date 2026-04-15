@@ -2,6 +2,24 @@ Revision history for Vips::Native
 
 {{$NEXT}}
 
+0.2.1  2026-04-16T00:01:51+01:00
+    - Build.rakumod: detect system glibc via `ldd --version` and
+      skip the prebuilt download when it's older than the prebuilt
+      target (currently v2.35, matching the ubuntu-22.04 CI runner).
+      Previously, users on Ubuntu 20.04 / Debian 11 / RHEL 8
+      downloaded a prebuilt libvips that loaded but failed at first
+      symbol use with "GLIBC_2.xx not found". The guard fires before
+      the download and routes to this module's existing system-
+      libvips fallback (Native.rakumod resolves via the OS dynamic
+      loader) — users just need `libvips` from their distro.
+      VIPS_NATIVE_BINARY_ONLY=1 now hard-fails with a clear message
+      on old-glibc systems rather than producing a broken install.
+    - New CI workflow .github/workflows/glibc-fallback.yml: runs
+      `zef install .` inside an ubuntu:20.04 container (glibc 2.31,
+      with apt-installed libvips42) and asserts both that the
+      fallback message appears in the build log and that vips_init()
+      against the system libvips succeeds.
+
 0.2.0  2026-04-15T04:11:52+01:00
     - Prebuilt-binary-first install path. Build.rakumod now attempts
       to download a per-platform archive from the repo's GitHub

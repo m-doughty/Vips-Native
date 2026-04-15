@@ -20,6 +20,14 @@
 #|      meson build would dwarf the whole rest of the install — the
 #|      pragmatic fallback is "you install libvips yourself".
 #|
+#| Linux prebuilts are built on ubuntu-22.04 (glibc 2.35 — see the
+#| $MIN-GLIBC constant). On systems with older glibc (Ubuntu 20.04 /
+#| Debian 11 / RHEL 8 / etc.) the prebuilt libvips loads but dies at
+#| first symbol use with "GLIBC_2.xx not found". Build detects this
+#| via `ldd --version` and short-circuits to the system-libvips
+#| fallback (Native.rakumod resolves via the OS loader) before the
+#| download even happens.
+#|
 #| Why we don't use META6 resources for the libs: zef hashes every
 #| staged resource filename, breaking the inter-lib references baked
 #| into libvips (libvips.42.dylib expects libgobject-2.0.0.dylib
@@ -47,6 +55,13 @@ class Build {
 
     constant $DEFAULT-BASE-URL =
         'https://github.com/m-doughty/Vips-Native/releases/download';
+
+    # Minimum glibc the prebuilt Linux archives are compatible with.
+    # The CI workflow builds on ubuntu-22.04 (glibc 2.35); libvips +
+    # its format deps reference GLIBC_2.3x versioned symbols so
+    # loading on older systems fails with "GLIBC_2.xx not found".
+    # Bump in lockstep with the CI runner OS.
+    constant $MIN-GLIBC = v2.35;
 
     # Map (OS, hardware) → platform slug used in release artefact
     # filenames + cache paths. All five platforms covered by upstream
@@ -92,6 +107,30 @@ class Build {
                   ~ "for { $*KERNEL.name }-{ $*KERNEL.hardware }.";
             }
             return True;
+        }
+
+        # Guard: prebuilt Linux archives are built on ubuntu-22.04
+        # (glibc $MIN-GLIBC). On older glibc the downloaded libvips
+        # loads but dies at first symbol use with "GLIBC_2.xx not
+        # found". Detect here and skip the download — Native.rakumod
+        # falls through to system libvips at first FFI call, which is
+        # this module's existing degraded-mode behaviour.
+        if $plat.ends-with('-glibc') {
+            my Version $have = self!detect-glibc-version;
+            if $have.defined && $have cmp $MIN-GLIBC == Less {
+                if $binary-only {
+                    die "VIPS_NATIVE_BINARY_ONLY=1 set but system glibc "
+                      ~ "$have is older than prebuilt target $MIN-GLIBC "
+                      ~ "($plat / $binary-tag). Install a newer libvips "
+                      ~ "or unset VIPS_NATIVE_BINARY_ONLY to allow "
+                      ~ "system-libvips fallback.";
+                }
+                note "⚠️  System glibc $have is older than prebuilt "
+                   ~ "target $MIN-GLIBC — skipping prebuilt download. "
+                   ~ "Native.rakumod will fall back to system libvips "
+                   ~ "via the OS dynamic loader.";
+                return True;
+            }
         }
 
         if self!try-prebuilt($dist-path, $plat, $binary-tag, $stage) {
@@ -260,5 +299,22 @@ class Build {
     method !detect-platform(--> Str) {
         my Str $key = "{$*KERNEL.name.lc}-{$*KERNEL.hardware.lc}";
         %PLATFORM-SLUGS{$key};
+    }
+
+    #| Parse `ldd --version` for the system's glibc version. Returns a
+    #| Version on glibc systems, undefined Version on musl (ldd --version
+    #| exits non-zero) or when ldd is absent / unparseable. Only
+    #| meaningful on Linux — don't call on other OSes.
+    method !detect-glibc-version(--> Version) {
+        my $proc = try { run 'ldd', '--version', :out, :err };
+        return Version without $proc;
+        my $out = $proc.out.slurp(:close);
+        $proc.err.slurp(:close);
+        return Version unless $proc.exitcode == 0;
+        my $first = $out.lines.head // '';
+        if $first ~~ / (\d+ '.' \d+ [ '.' \d+ ]?) \s* $ / {
+            return Version.new(~$0);
+        }
+        Version;
     }
 }
