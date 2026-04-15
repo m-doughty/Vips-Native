@@ -175,18 +175,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Resolve version + tag
+      - name: Resolve version + tag from BINARY_TAG
         id: vars
+        shell: bash
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            VIPS_VERSION="${{ github.event.inputs.vips_version }}"
-            RECIPE_REV="${{ github.event.inputs.recipe_rev }}"
-          else
-            tag="${GITHUB_REF#refs/tags/}"
-            VIPS_VERSION="$(echo "$tag" | sed -E 's/^binaries-vips-(.+)-r[0-9]+$/\1/')"
-            RECIPE_REV="$(echo "$tag" | sed -E 's/^binaries-vips-.+-r([0-9]+)$/\1/')"
+          set -euxo pipefail
+          BINARY_TAG="$(head -n1 BINARY_TAG | tr -d '[:space:]')"
+          if [[ -z "$BINARY_TAG" ]]; then
+            echo "❌ BINARY_TAG empty / missing."
+            ls -la BINARY_TAG || true
+            exit 1
           fi
-          BINARY_TAG="binaries-vips-${VIPS_VERSION}-r${RECIPE_REV}"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            pushed="${GITHUB_REF#refs/tags/}"
+            if [[ "$pushed" != "$BINARY_TAG" ]]; then
+              echo "❌ Pushed tag '$pushed' doesn't match BINARY_TAG '$BINARY_TAG'."
+              exit 1
+            fi
+          fi
+          VIPS_VERSION="$(echo "$BINARY_TAG" | sed -E 's/^binaries-vips-(.+)-r[0-9]+$/\1/')"
+          if [[ -z "$VIPS_VERSION" || "$VIPS_VERSION" == "$BINARY_TAG" ]]; then
+            echo "❌ Could not parse vips version from BINARY_TAG='$BINARY_TAG'."
+            echo "   Expected format: binaries-vips-<version>-r<N>"
+            exit 1
+          fi
           echo "vips_version=$VIPS_VERSION" >> "$GITHUB_OUTPUT"
           echo "binary_tag=$BINARY_TAG"     >> "$GITHUB_OUTPUT"
 
@@ -312,18 +324,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Resolve version + tag
+      - name: Resolve version + tag from BINARY_TAG
         id: vars
+        shell: bash
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            VIPS_VERSION="${{ github.event.inputs.vips_version }}"
-            RECIPE_REV="${{ github.event.inputs.recipe_rev }}"
-          else
-            tag="${GITHUB_REF#refs/tags/}"
-            VIPS_VERSION="$(echo "$tag" | sed -E 's/^binaries-vips-(.+)-r[0-9]+$/\1/')"
-            RECIPE_REV="$(echo "$tag" | sed -E 's/^binaries-vips-.+-r([0-9]+)$/\1/')"
+          set -euxo pipefail
+          BINARY_TAG="$(head -n1 BINARY_TAG | tr -d '[:space:]')"
+          if [[ -z "$BINARY_TAG" ]]; then
+            echo "❌ BINARY_TAG empty / missing."
+            ls -la BINARY_TAG || true
+            exit 1
           fi
-          BINARY_TAG="binaries-vips-${VIPS_VERSION}-r${RECIPE_REV}"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            pushed="${GITHUB_REF#refs/tags/}"
+            if [[ "$pushed" != "$BINARY_TAG" ]]; then
+              echo "❌ Pushed tag '$pushed' doesn't match BINARY_TAG '$BINARY_TAG'."
+              exit 1
+            fi
+          fi
+          VIPS_VERSION="$(echo "$BINARY_TAG" | sed -E 's/^binaries-vips-(.+)-r[0-9]+$/\1/')"
+          if [[ -z "$VIPS_VERSION" || "$VIPS_VERSION" == "$BINARY_TAG" ]]; then
+            echo "❌ Could not parse vips version from BINARY_TAG='$BINARY_TAG'."
+            echo "   Expected format: binaries-vips-<version>-r<N>"
+            exit 1
+          fi
           echo "vips_version=$VIPS_VERSION" >> "$GITHUB_OUTPUT"
           echo "binary_tag=$BINARY_TAG"     >> "$GITHUB_OUTPUT"
 

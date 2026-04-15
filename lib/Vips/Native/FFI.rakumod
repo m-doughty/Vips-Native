@@ -26,8 +26,17 @@ constant $ext = $os ~~ /darwin/ ?? 'dylib'
              !! 'so';
 
 sub _staged-lib-dir(--> IO::Path) {
+    # %?RESOURCES<BINARY_TAG> can misbehave during zef's dep-
+    # resolution compile pass — it sometimes returns the resources
+    # directory itself (stringified-from-Any) when the resources
+    # dict isn't fully populated. Insist on .f (regular file) and
+    # try {} the slurp so a bad value falls through cleanly to the
+    # system-libvips fallback instead of dying.
     my $res = %?RESOURCES<BINARY_TAG>;
-    my Str $tag = ($res.defined && $res.IO.e) ?? $res.IO.slurp.trim !! '';
+    my Str $tag = '';
+    if $res.defined && $res.IO.f {
+        $tag = (try $res.IO.slurp.trim) // '';
+    }
     return Nil unless $tag.chars;
     my Str $base = %*ENV<VIPS_NATIVE_DATA_DIR>
         // %*ENV<XDG_DATA_HOME>
