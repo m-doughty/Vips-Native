@@ -1,7 +1,74 @@
 unit module Vips::Native::FFI;
 
 use NativeCall;
-use MacOS::NativeLib <vips gobject-2.0>;
+
+# === Library resolution ===
+#
+# Resolve libvips and libgobject-2.0 in this order:
+#
+#   1. $VIPS_NATIVE_LIB_DIR env var — explicit override. Full path
+#      to a directory containing both libs. Escape hatch for custom
+#      vips builds; you take responsibility for ABI.
+#   2. XDG-staged dir (Build.rakumod's prebuilt-download path) —
+#      $XDG_DATA_HOME/Vips-Native/<binary-tag>/lib/. Filenames
+#      preserved (libvips.42.dylib, libgobject-2.0.0.so, etc.) so
+#      the inter-lib refs vips bakes in via @loader_path / $ORIGIN /
+#      sibling-DLL all resolve correctly.
+#   3. Bare library name — let the OS dynamic loader find it via
+#      LD_LIBRARY_PATH / DYLD_FALLBACK_LIBRARY_PATH / Windows DLL
+#      search order. This is the system-libvips fallback (matches
+#      0.1.x behaviour for systems with libvips installed via
+#      package manager).
+
+constant $os = $*KERNEL.name.lc;
+constant $ext = $os ~~ /darwin/ ?? 'dylib'
+             !! $*DISTRO.is-win ?? 'dll'
+             !! 'so';
+
+sub _staged-lib-dir(--> IO::Path) {
+    my $res = %?RESOURCES<BINARY_TAG>;
+    my Str $tag = ($res.defined && $res.IO.e) ?? $res.IO.slurp.trim !! '';
+    return Nil unless $tag.chars;
+    my Str $base = %*ENV<VIPS_NATIVE_DATA_DIR>
+        // %*ENV<XDG_DATA_HOME>
+        // ($*DISTRO.is-win
+                ?? (%*ENV<LOCALAPPDATA>
+                        // "{%*ENV<USERPROFILE> // '.'}\\AppData\\Local")
+                !! "{%*ENV<HOME> // '.'}/.local/share");
+    "$base/Vips-Native/$tag/lib".IO;
+}
+
+# Find a lib by basename (without ext) in $dir, accepting versioned
+# variants since vips ships per-platform names like libvips.42.dylib,
+# libvips.so.42, libvips-42.dll.
+sub _find-in(IO::Path $dir, Str $name --> Str) {
+    return Str unless $dir.defined && $dir.d;
+    my $exact = $dir.add("$name.$ext");
+    return $exact.Str if $exact.e;
+
+    for $dir.dir -> $entry {
+        next unless $entry.e;
+        my $bn = $entry.basename;
+        return $entry.Str if $bn.starts-with("$name.") && $bn.contains(".$ext");
+        return $entry.Str if $bn.starts-with("$name-") && $bn.ends-with(".$ext");
+    }
+    Str;
+}
+
+#| Resolve a lib by name. Returns either an absolute path (env
+#| override or XDG-staged) or the bare short name (system loader
+#| fallback — e.g. 'vips', 'gobject-2.0' — which lets NativeCall
+#| use the OS dynamic loader to find a system-installed libvips).
+sub _resolve-lib(Str $name, Str $short-name --> Str) {
+    if (my $override = %*ENV<VIPS_NATIVE_LIB_DIR>) && $override.IO.d {
+        with _find-in($override.IO, $name) { return $_ }
+    }
+    with _find-in(_staged-lib-dir(), $name) { return $_ }
+    $short-name;
+}
+
+constant $vips-lib    is export = _resolve-lib('libvips',         'vips');
+constant $gobject-lib is export = _resolve-lib('libgobject-2.0',  'gobject-2.0');
 
 # VipsInteresting
 constant VIPS_INTERESTING_NONE      is export = 0;
@@ -27,17 +94,17 @@ constant VIPS_FALSE is export = 0;
 constant VIPS_TRUE  is export = 1;
 
 # vips_init
-sub vips_init(Str --> int32) is native('vips') is export { * }
+sub vips_init(Str --> int32) is native($vips-lib) is export { * }
 
 # VipsImage* is just an OpaquePointer
 class VipsImage is repr('CPointer') is export { }
 
 # vips_image_new_from_file(const char* name, ...)
-sub vips_image_new_from_file(Str, Str --> VipsImage) is native('vips') is export { * }
+sub vips_image_new_from_file(Str, Str --> VipsImage) is native($vips-lib) is export { * }
 
 # Get dimensions
-sub vips_image_get_width(VipsImage --> int32) is native('vips') is export { * }
-sub vips_image_get_height(VipsImage --> int32) is native('vips') is export { * }
+sub vips_image_get_width(VipsImage --> int32) is native($vips-lib) is export { * }
+sub vips_image_get_height(VipsImage --> int32) is native($vips-lib) is export { * }
 
 # Smartcrop
 sub vips_smartcrop(
@@ -48,7 +115,7 @@ sub vips_smartcrop(
 	Str,                       # "interesting"
 	int32,                     # VIPS_INTERESTING_*
 	Str                        # NULL terminator for varargs
-) returns int32 is native('vips') is export { * }
+) returns int32 is native($vips-lib) is export { * }
 
 # Resize
 sub vips_resize(
@@ -58,15 +125,15 @@ sub vips_resize(
 	Str,                       # "kernel"
 	int32,                     # VIPS_KERNEL_*
 	Str                        # NULL terminator for varargs
-) returns int32 is native('vips') is export { * }
+) returns int32 is native($vips-lib) is export { * }
 
 # Save PNG
 sub vips_pngsave(
 	VipsImage,                  # in
 	Str,                        # filename
 	Str                         # NULL terminator for varargs
-) returns int32 is native('vips') is export { * }
+) returns int32 is native($vips-lib) is export { * }
 
 # Memory cleanup for images (from GLib/GObject)
-sub g_object_unref(VipsImage) is native('gobject-2.0') is export { * }
+sub g_object_unref(VipsImage) is native($gobject-lib) is export { * }
 

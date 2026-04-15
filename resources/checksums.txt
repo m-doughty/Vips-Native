@@ -1,0 +1,36 @@
+# Vips-Native prebuilt binary checksums.
+#
+# DO NOT hand-edit entries. After a binary release is published, CI
+# produces a checksums.txt as a release asset; copy its contents here:
+#
+#     gh release download "$(cat BINARY_TAG)" \
+#         --pattern checksums.txt --output /tmp/new.txt
+#     cp /tmp/new.txt resources/checksums.txt
+#     git add resources/checksums.txt
+#     git commit -m "Update binary checksums for $(cat BINARY_TAG)"
+#
+# Format: one entry per line
+#     <sha256-hex>  <artefact-filename>
+#
+# Lines starting with '#' and blank lines are ignored. When this file
+# is empty or doesn't list the expected artefact, every prebuilt
+# lookup fails SHA verify and Build.rakumod falls through to using
+# the system-installed libvips (via the OS dynamic loader resolving
+# `is native('vips')`) — same behaviour as Vips::Native 0.1.x.
+#
+# Each platform's archive bundles libvips + libgobject + libglib +
+# all the format-handling libs (jpeg/png/webp/tiff/gif/heif/avif and
+# their transitive deps), relocated with @loader_path (macOS) /
+# $ORIGIN (Linux) / sibling DLL layout (Windows) so they load from
+# the same XDG-staged directory.
+#
+# Sources we repackage from (the binary trust chain):
+#   macOS arm64           Homebrew bottle (vips formula)
+#   Linux x86_64 / arm64  conda-forge libvips package
+#   Windows x86_64        libvips/build-win64-mxe GitHub release
+
+# Pending r1 build — checksums will be filled in after CI publishes
+# the repackaged artefacts for all four platforms. Empty entries
+# here mean Build.rakumod's prebuilt path will fail SHA verify and
+# fall through to system libvips, which is the safe fallback while
+# we wait.

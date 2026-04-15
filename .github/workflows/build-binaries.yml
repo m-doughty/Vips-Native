@@ -1,0 +1,405 @@
+name: build-binaries
+
+# Repackages upstream-prebuilt libvips into self-contained per-
+# platform archives that Vips-Native's Build.rakumod can download
+# at install time. We do NOT compile vips ourselves — the upstream
+# sources (Homebrew, conda-forge, libvips/build-win64-mxe) are all
+# reputable and well-tested, and rebuilding vips's huge dep tree
+# from source in CI would be a maintenance nightmare.
+#
+# Per platform:
+#   1. Download libvips + transitive deps from the upstream source.
+#   2. Cherry-pick the .dylib/.so/.dll files we need; drop CLI
+#      binaries, headers, locales, docs, .a archives.
+#   3. Relocate inter-lib refs to @loader_path / $ORIGIN / sibling
+#      DLLs so the bundle is self-contained and movable.
+#   4. Repackage as vips-<platform>.{tar.gz,zip}.
+#   5. Publish to GitHub Releases under the BINARY_TAG.
+#
+# Trigger: workflow_dispatch (manual) with a libvips version input,
+# or pushing a tag matching binaries-vips-*.
+
+on:
+  workflow_dispatch:
+    inputs:
+      vips_version:
+        description: 'libvips version to repackage (e.g. 8.15.5)'
+        required: true
+        default: '8.15.5'
+      recipe_rev:
+        description: 'Recipe revision (bump on workflow changes for the same vips version)'
+        required: true
+        default: '1'
+  push:
+    tags:
+      - 'binaries-vips-*'
+
+jobs:
+  # ---------------------------------------------------------------
+  # macOS arm64 — Homebrew bottle
+  # ---------------------------------------------------------------
+  build-macos:
+    name: build-macos-arm64
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version + tag
+        id: vars
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            VIPS_VERSION="${{ github.event.inputs.vips_version }}"
+            RECIPE_REV="${{ github.event.inputs.recipe_rev }}"
+          else
+            # Tag form: binaries-vips-<version>-r<rev>
+            tag="${GITHUB_REF#refs/tags/}"
+            VIPS_VERSION="$(echo "$tag" | sed -E 's/^binaries-vips-(.+)-r[0-9]+$/\1/')"
+            RECIPE_REV="$(echo "$tag" | sed -E 's/^binaries-vips-.+-r([0-9]+)$/\1/')"
+          fi
+          BINARY_TAG="binaries-vips-${VIPS_VERSION}-r${RECIPE_REV}"
+          echo "vips_version=$VIPS_VERSION" >> "$GITHUB_OUTPUT"
+          echo "binary_tag=$BINARY_TAG"   >> "$GITHUB_OUTPUT"
+
+      - name: Install vips via Homebrew
+        run: |
+          set -euxo pipefail
+          # Homebrew bottles are version-pinned per formula. We can
+          # `brew install vips@${VIPS_VERSION}` only if a versioned
+          # formula exists; otherwise install latest and assert the
+          # version matches what we requested.
+          brew update
+          brew install vips dylibbundler
+          INSTALLED=$(brew list --versions vips | awk '{print $2}')
+          REQUESTED='${{ steps.vars.outputs.vips_version }}'
+          if [[ "$INSTALLED" != "$REQUESTED"* ]]; then
+            echo "❌ Homebrew installed vips $INSTALLED but workflow requested $REQUESTED."
+            echo "   Either bump the workflow input to match Homebrew's current version,"
+            echo "   or pin via 'brew tap-new' / explicit formula URL."
+            exit 1
+          fi
+
+      - name: Stage + bundle
+        run: |
+          set -euxo pipefail
+          BREW_PREFIX=$(brew --prefix)
+          VIPS_CELLAR=$(brew --prefix vips)
+          mkdir -p bundle
+
+          # Stage the entry-point lib(s) — dylibbundler will pull in
+          # transitive deps automatically. Use -of (overwrite files,
+          # not -od which wipes the dest dir).
+          cp "$VIPS_CELLAR/lib/libvips.42.dylib" bundle/
+
+          # `-s` paths tell dylibbundler where to look for sibling
+          # libs by their @rpath / unqualified install_name refs.
+          # Adding both the brew prefix lib dir and each tapped
+          # cellar's lib dir covers the usual layout.
+          dylibbundler \
+              -of \
+              -b \
+              -x bundle/libvips.42.dylib \
+              -d bundle \
+              -p '@loader_path/' \
+              -s "$BREW_PREFIX/lib" \
+              -s "$BREW_PREFIX/opt/glib/lib" \
+              -s "$BREW_PREFIX/opt/gettext/lib" \
+              -s "$BREW_PREFIX/opt/libffi/lib"
+
+          # Codesign — dylibbundler's install_name_tool calls
+          # invalidate the linker-emitted ad-hoc signature. macOS
+          # Sequoia kernel SIGKILLs on tainted page access without
+          # a valid sig. Same fix as Notcurses-Native.
+          find bundle -name '*.dylib' -type f ! -type l \
+            -exec codesign --force --sign - --timestamp=none {} \;
+          for f in bundle/*.dylib; do
+            [[ -L "$f" ]] && continue
+            codesign --verify "$f" || { echo "❌ $f failed verify"; exit 1; }
+          done
+
+          # Symlinks for the unversioned name so resolution works
+          # whether the caller asks for `libvips.dylib` or the
+          # versioned `libvips.42.dylib`.
+          ln -sf libvips.42.dylib bundle/libvips.dylib
+
+          echo "--- bundle contents ---"
+          ls -la bundle/
+
+      - name: Package archive
+        id: package
+        run: |
+          set -euxo pipefail
+          artifact="vips-macos-arm64.tar.gz"
+          tar -czf "$artifact" -C bundle .
+          sha256sum "$artifact" | tee "${artifact}.sha256"
+          mkdir -p artefacts
+          mv "$artifact" "${artifact}.sha256" artefacts/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vips-macos-arm64
+          path: artefacts/
+          retention-days: 14
+
+  # ---------------------------------------------------------------
+  # Linux — conda-forge libvips package, x86_64 + aarch64
+  # ---------------------------------------------------------------
+  build-linux:
+    name: build-${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            platform: linux-x86_64-glibc
+            conda-subdir: linux-64
+          - os: ubuntu-22.04-arm
+            platform: linux-aarch64-glibc
+            conda-subdir: linux-aarch64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version + tag
+        id: vars
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            VIPS_VERSION="${{ github.event.inputs.vips_version }}"
+            RECIPE_REV="${{ github.event.inputs.recipe_rev }}"
+          else
+            tag="${GITHUB_REF#refs/tags/}"
+            VIPS_VERSION="$(echo "$tag" | sed -E 's/^binaries-vips-(.+)-r[0-9]+$/\1/')"
+            RECIPE_REV="$(echo "$tag" | sed -E 's/^binaries-vips-.+-r([0-9]+)$/\1/')"
+          fi
+          BINARY_TAG="binaries-vips-${VIPS_VERSION}-r${RECIPE_REV}"
+          echo "vips_version=$VIPS_VERSION" >> "$GITHUB_OUTPUT"
+          echo "binary_tag=$BINARY_TAG"     >> "$GITHUB_OUTPUT"
+
+      - uses: conda-incubator/setup-miniconda@v3
+        with:
+          auto-update-conda: false
+          channels: conda-forge
+          channel-priority: strict
+
+      - name: Install patchelf
+        run: sudo apt-get install -y --no-install-recommends patchelf
+
+      - name: Fetch libvips from conda-forge
+        shell: bash -el {0}
+        run: |
+          set -euxo pipefail
+          conda create -y -n vipsenv -c conda-forge \
+              "libvips=${{ steps.vars.outputs.vips_version }}"
+          # conda env's lib dir is where libvips + glib + the
+          # format libs all live, with their real filenames.
+          ENV_LIB="$CONDA/envs/vipsenv/lib"
+          echo "ENV_LIB=$ENV_LIB" >> "$GITHUB_ENV"
+
+      - name: Stage + bundle
+        shell: bash -el {0}
+        run: |
+          set -euxo pipefail
+          mkdir -p bundle
+
+          # Start from libvips.so.42 and walk transitive deps via ldd.
+          # Skip system libs (anything under /usr or /lib) — those are
+          # base glibc / libstdc++ that any user system has.
+          cp "$ENV_LIB"/libvips.so.42* bundle/ || true
+          cp -d "$ENV_LIB"/libvips.so* bundle/ 2>/dev/null || true
+
+          declare -A SEEN
+          process_deps() {
+            local lib="$1"
+            local depth="${2:-0}"
+            (( depth > 12 )) && return 0
+            local key="$(basename "$lib")"
+            [[ -n "${SEEN[$key]:-}" ]] && return 0
+            SEEN[$key]=1
+            ldd "$lib" 2>/dev/null \
+              | sed -nE 's/^[[:space:]]*([^ ]+) => ([^ ]+) .*/\1\t\2/p' \
+              | while IFS=$'\t' read -r name path; do
+                  [[ -z "$path" ]] && continue
+                  # Skip system libs — these stay dynamic.
+                  case "$path" in
+                    /lib/*|/lib64/*|/usr/lib/*|/usr/lib64/*) continue ;;
+                  esac
+                  # Skip the linker itself.
+                  case "$name" in
+                    ld-linux*|linux-vdso*|libc.so*|libm.so*|libpthread.so*|libdl.so*|librt.so*|libstdc++.so*|libgcc_s.so*) continue ;;
+                  esac
+                  if [[ ! -f "bundle/$name" ]]; then
+                    cp "$path" "bundle/$name"
+                    echo "Bundled: $name (from $path)"
+                    process_deps "bundle/$name" $((depth + 1))
+                  fi
+                done
+          }
+
+          for lib in bundle/libvips.so*; do
+            [[ -L "$lib" ]] && continue
+            process_deps "$lib"
+          done
+
+          # Set $ORIGIN rpath on every bundled .so so they find each
+          # other by sibling lookup at runtime, regardless of where
+          # the user installs the bundle dir on disk.
+          for so in bundle/*.so*; do
+            [[ -L "$so" ]] && continue
+            patchelf --set-rpath '$ORIGIN' "$so" || true
+          done
+
+          # Convenience symlink for the unversioned name.
+          ln -sf libvips.so.42 bundle/libvips.so
+
+          echo "--- bundle contents ---"
+          ls -la bundle/
+
+      - name: Package archive
+        run: |
+          set -euxo pipefail
+          artifact="vips-${{ matrix.platform }}.tar.gz"
+          tar -czf "$artifact" -C bundle .
+          sha256sum "$artifact" | tee "${artifact}.sha256"
+          mkdir -p artefacts
+          mv "$artifact" "${artifact}.sha256" artefacts/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vips-${{ matrix.platform }}
+          path: artefacts/
+          retention-days: 14
+
+  # ---------------------------------------------------------------
+  # Windows x86_64 — libvips/build-win64-mxe official prebuilt
+  # ---------------------------------------------------------------
+  build-windows:
+    name: build-windows-x86_64
+    runs-on: windows-2022
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version + tag
+        id: vars
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            VIPS_VERSION="${{ github.event.inputs.vips_version }}"
+            RECIPE_REV="${{ github.event.inputs.recipe_rev }}"
+          else
+            tag="${GITHUB_REF#refs/tags/}"
+            VIPS_VERSION="$(echo "$tag" | sed -E 's/^binaries-vips-(.+)-r[0-9]+$/\1/')"
+            RECIPE_REV="$(echo "$tag" | sed -E 's/^binaries-vips-.+-r([0-9]+)$/\1/')"
+          fi
+          BINARY_TAG="binaries-vips-${VIPS_VERSION}-r${RECIPE_REV}"
+          echo "vips_version=$VIPS_VERSION" >> "$GITHUB_OUTPUT"
+          echo "binary_tag=$BINARY_TAG"     >> "$GITHUB_OUTPUT"
+
+      - name: Fetch + extract build-win64-mxe prebuilt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euxo pipefail
+          # build-win64-mxe ships zips named like:
+          #   vips-dev-w64-all-8.15.5.zip   (full build, all formats)
+          #   vips-dev-w64-web-8.15.5.zip   (web only)
+          # We want -all for the heif/avif/openslide formats. The
+          # repo exposes them as GitHub releases on libvips/build-win64-mxe.
+          ZIP="vips-dev-w64-all-${{ steps.vars.outputs.vips_version }}.zip"
+          gh release download "v${{ steps.vars.outputs.vips_version }}" \
+              --repo libvips/build-win64-mxe \
+              --pattern "$ZIP" \
+              --output "$ZIP"
+          # Zip extracts to vips-dev-<version>/ with bin/ + lib/ +
+          # include/ + share/. We want bin/*.dll (all libs ship as
+          # DLLs in bin/ on this layout, not lib/).
+          unzip -q "$ZIP"
+          extract_dir="vips-dev-${{ steps.vars.outputs.vips_version }}"
+          if [[ ! -d "$extract_dir" ]]; then
+            # Some versions name the top-level dir vips-dev-X.Y instead.
+            extract_dir=$(ls -d vips-dev-* | head -1)
+          fi
+          echo "EXTRACT_DIR=$extract_dir" >> "$GITHUB_ENV"
+
+      - name: Stage DLLs
+        run: |
+          set -euxo pipefail
+          mkdir -p bundle
+          # Sibling-DLL search means we just copy every DLL the
+          # upstream zip ships — they're all already designed to
+          # live in the same dir. Skip executables (vips.exe, vipsedit
+          # .exe etc) — we only want the library set.
+          cp "$EXTRACT_DIR"/bin/*.dll bundle/
+
+          echo "--- bundle contents ---"
+          ls -la bundle/ | head -50
+          echo "(total: $(ls bundle/ | wc -l) files)"
+
+      - name: Package archive
+        run: |
+          set -euxo pipefail
+          artifact="vips-windows-x86_64.zip"
+          (cd bundle && 7z a "../$artifact" .)
+          sha256sum "$artifact" | tee "${artifact}.sha256"
+          mkdir -p artefacts
+          mv "$artifact" "${artifact}.sha256" artefacts/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vips-windows-x86_64
+          path: artefacts/
+          retention-days: 14
+
+  # ---------------------------------------------------------------
+  # Aggregate + publish release
+  # ---------------------------------------------------------------
+  publish:
+    name: publish
+    needs: [build-macos, build-linux, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve tag
+        id: vars
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            BINARY_TAG="binaries-vips-${{ github.event.inputs.vips_version }}-r${{ github.event.inputs.recipe_rev }}"
+          else
+            BINARY_TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "binary_tag=$BINARY_TAG" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Aggregate + checksum
+        run: |
+          set -euxo pipefail
+          mkdir -p release
+          find dist -type f \( -name '*.tar.gz' -o -name '*.zip' \) \
+              -exec cp {} release/ \;
+          (cd release && sha256sum *.tar.gz *.zip 2>/dev/null) > release/checksums.txt
+          ls -la release/
+          cat release/checksums.txt
+
+      - name: Create / update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euxo pipefail
+          tag="${{ steps.vars.outputs.binary_tag }}"
+          # Idempotent: edit if exists, else create.
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" release/* --clobber
+          else
+            gh release create "$tag" release/* \
+                --title "$tag" \
+                --notes "Repackaged libvips prebuilts. See resources/checksums.txt in Vips-Native for the verified hashes."
+          fi

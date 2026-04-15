@@ -16,15 +16,18 @@ jobs:
         os:
           - ubuntu-latest
           - macos-latest
-        raku-version:
-          - 'latest'
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+
       - uses: Raku/setup-raku@v1
         with:
-          raku-version: ${{ matrix.raku-version }}
-      - name: Install libvips
+          raku-version: 'latest'
+
+      # System libvips is the safety net for the prefer-system /
+      # source fallback path. Always installed so we can exercise
+      # both branches.
+      - name: Install system libvips
         shell: bash
         run: |
           if [[ "$RUNNER_OS" == "Linux" ]]; then
@@ -33,9 +36,28 @@ jobs:
           elif [[ "$RUNNER_OS" == "macOS" ]]; then
             brew install vips
           fi
-      - name: Install Dependencies
-        run: zef install --/test --test-depends --deps-only .
+
+      # Prebuilt path: zef install runs Build.rakumod which downloads
+      # the prebuilt archive (when available for this platform), SHA-
+      # verifies, and stages to ~/.local/share/Vips-Native/<tag>/lib/.
+      - name: Install Vips::Native via prebuilt path
+        run: zef install --/test .
+
       - name: Install App::Prove6
         run: zef install --/test App::Prove6
-      - name: Run Tests
-        run: prove6 --verbose -I. t
+
+      - name: Run tests — prebuilt path
+        run: prove6 --verbose -I lib t
+
+      # System-libvips fallback path. Re-install with PREFER_SYSTEM=1
+      # so Build.rakumod skips the download — Native.rakumod's
+      # resolver should then return the bare 'vips' / 'gobject-2.0'
+      # short names and let the OS dynamic loader find the apt /
+      # brew-installed libvips.
+      - name: Install Vips::Native via system-libvips path
+        env:
+          VIPS_NATIVE_PREFER_SYSTEM: '1'
+        run: zef install --/test --force-install .
+
+      - name: Run tests — system-libvips path
+        run: prove6 --verbose -I lib t
