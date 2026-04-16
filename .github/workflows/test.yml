@@ -87,19 +87,52 @@ jobs:
           echo "=== otool libvips.42.dylib ==="
           otool -L "$HOME"/.local/share/Vips-Native/*/lib/libvips.42.dylib 2>&1 | head -40
           echo "=== vips_error_buffer after failed PNG load ==="
+          # Read vips_error_buffer as raw bytes (via CArray[uint8])
+          # instead of Str — libvips error messages can contain
+          # locale-encoded bytes (0xa0 non-breaking space etc.)
+          # that aren't valid UTF-8, and the default Str decode
+          # explodes before we see what went wrong. Print as both
+          # hex and lossy-decoded ASCII so the actual text is
+          # visible regardless of encoding.
           raku -Ilib -e '
             use Vips::Native::FFI;
             use NativeCall;
-            sub vips_error_buffer(--> Str) is native($vips-lib) { * };
-            sub vips_error_clear()        is native($vips-lib) { * };
+            sub vips_error_buffer(--> Pointer) is native($vips-lib) { * };
+            sub vips_error_clear()             is native($vips-lib) { * };
+            sub strlen(Pointer --> size_t)     is native("c")       { * };
+
             vips_error_clear();
             my $rc = vips_init("diag");
             say "vips_init = $rc";
-            say "post-init error: ", vips_error_buffer() // "(null)";
+
+            sub dump-err($label) {
+                my $ptr = vips_error_buffer();
+                if !$ptr {
+                    say "$label: (null pointer)";
+                    return;
+                }
+                my $n = strlen($ptr);
+                if $n == 0 {
+                    say "$label: (empty)";
+                    return;
+                }
+                my $arr = nativecast(CArray[uint8], $ptr);
+                my @bytes = (^$n).map({ $arr[$_] });
+                my $printable = @bytes.map({ 32 <= $_ <= 126 ?? .chr !! sprintf("\\x%02x", $_) }).join;
+                say "$label: ($n bytes): $printable";
+            }
+
+            dump-err("post-init error");
             my $img = vips_image_new_from_file("t/fixtures/camelia.png", Str);
             say "image defined: ", $img.defined;
-            say "vips error: ", vips_error_buffer() // "(null)";
+            dump-err("post-load error");
           ' 2>&1 || true
+
+          echo "=== which libvips is dyld actually loading ==="
+          DYLD_PRINT_LIBRARIES=1 raku -Ilib -e '
+            use Vips::Native::FFI;
+            vips_init("trace");
+          ' 2>&1 | grep -iE 'libvips|libgio|libglib|libgobject|libheif|libpng' | head -30 || true
 
       # ---------------------------------------------------------
       # System-libvips fallback path. Two things matter for this
