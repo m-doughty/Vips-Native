@@ -165,6 +165,34 @@ sub _configure-runtime-env() {
     if $modules.d && !%*ENV<VIPS_MODULEDIR> {
         %*ENV<VIPS_MODULEDIR> = $modules.Str;
     }
+
+    # Disable GIO extension-module loading entirely.
+    #
+    # Our bundled libgio was compiled with GIO_MODULE_DIR baked to
+    # the builder's prefix (Homebrew's cellar on macOS, conda's
+    # prefix on Linux). At g_type_init time, GIO scans that dir and
+    # dlopens every .so — and those modules are linked against the
+    # *builder's* libgio, not our bundled one. On macOS specifically
+    # this ends with two libgio-2.0.0.dylibs loaded and ObjC classes
+    # (GNotificationCenterDelegate, GCocoaNotificationBackend, etc.)
+    # registered twice, which macOS treats as a duplicate-class
+    # error and bails.
+    #
+    # libvips only needs GIO's core type system (GObject, GType),
+    # which is statically linked into libgio — the extension modules
+    # (GSettings backends, proxy resolvers, network monitors) aren't
+    # touched. Pointing GIO_MODULE_DIR at a guaranteed-nonexistent
+    # path makes GIO find nothing to load; g_dir_open returns NULL
+    # silently without logging.
+    #
+    # /dev/null is a file on every POSIX system, so /dev/null/anything
+    # can never be a valid directory path — safe portable sentinel.
+    # Windows uses NUL; we gate the whole block on POSIX since the
+    # duplicate-class crash is ObjC-specific and GIO's module system
+    # doesn't present the same way on Windows.
+    if $os ~~ /darwin|linux/ && !%*ENV<GIO_MODULE_DIR> {
+        %*ENV<GIO_MODULE_DIR> = '/dev/null/vips-native-no-gio-modules';
+    }
 }
 _configure-runtime-env();
 
