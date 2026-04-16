@@ -703,23 +703,16 @@ jobs:
               exit 1
           fi
 
-          # Compile the varargs shim. build-win64-mxe ships import
-          # libraries alongside DLLs; we link the shim against the
-          # import lib so LoadLibrary resolves the dep at runtime via
-          # sibling-DLL search (PATH prepend from FFI.rakumod).
-          # GH windows-2022 has MinGW-w64 at C:\msys64\mingw64.
-          MINGW_GCC="/c/msys64/mingw64/bin/gcc.exe"
-          if [[ -x "$MINGW_GCC" ]]; then
-              "$MINGW_GCC" -O2 -shared \
-                  -o bundle/libvips_shim.dll \
-                  src/vips_native_shim.c \
-                  -Lbundle -lvips-42
-          else
-              echo "WARN: MinGW gcc not found at $MINGW_GCC — shim not compiled."
-              echo "      Windows x64 tests pass without it (ABI overlap)."
-              echo "      Windows arm64 would need it — add MinGW setup if"
-              echo "      an arm64 Raku runner ever becomes available."
-          fi
+          # TODO: compile the varargs shim for Windows. Currently
+          # skipped because build-win64-mxe ships GNU-format import
+          # libs (.dll.a) that cl.exe can't link against, and MinGW
+          # gcc isn't pre-installed on windows-2022 runners. Would
+          # need `pacman -S mingw-w64-x86_64-gcc` (x64) or a cross-
+          # compiler for arm64. x64 tests pass without the shim
+          # (ABI overlap); arm64 Windows + Raku doesn't exist yet
+          # but would need the shim (same AAPCS64 divergence as
+          # macOS arm64). Add when either arm64 Windows Raku
+          # appears or we want defence-in-depth on x64.
 
       - name: Package archive
         run: |
