@@ -95,6 +95,7 @@ class Build {
         if $prefer-system {
             say "VIPS_NATIVE_PREFER_SYSTEM=1 — skipping prebuilt, will use "
               ~ "system libvips via OS dynamic loader.";
+            self!try-compile-shim($dist-path, $stage);
             return True;
         }
 
@@ -106,6 +107,7 @@ class Build {
                 die "VIPS_NATIVE_BINARY_ONLY=1 set but no prebuilt platform "
                   ~ "for { $*KERNEL.name }-{ $*KERNEL.hardware }.";
             }
+            self!try-compile-shim($dist-path, $stage);
             return True;
         }
 
@@ -129,6 +131,7 @@ class Build {
                    ~ "target $MIN-GLIBC — skipping prebuilt download. "
                    ~ "Native.rakumod will fall back to system libvips "
                    ~ "via the OS dynamic loader.";
+                self!try-compile-shim($dist-path, $stage);
                 return True;
             }
         }
@@ -136,6 +139,10 @@ class Build {
         if self!try-prebuilt($dist-path, $plat, $binary-tag, $stage) {
             say "✅ Installed prebuilt Vips binaries ($plat) for "
               ~ "$binary-tag → $stage.";
+            # Prebuilt bundle should include the shim already, but
+            # compile if it doesn't (pre-r6 binary tag, or macOS-
+            # only shim on a newly-released platform).
+            self!try-compile-shim($dist-path, $stage);
             return True;
         }
 
@@ -146,6 +153,7 @@ class Build {
 
         note "⚠️  Prebuilt unavailable for $plat ($binary-tag) — "
            ~ "Native.rakumod will fall back to system libvips.";
+        self!try-compile-shim($dist-path, $stage);
         True;
     }
 
@@ -316,5 +324,71 @@ class Build {
             return Version.new(~$0);
         }
         Version;
+    }
+
+    #| Compile the varargs ABI shim if it doesn't already exist in
+    #| $stage (prebuilt bundles from r6+ ship it, but older bundles
+    #| and system-libvips fallback paths don't). The shim wraps
+    #| libvips's variadic C entry points in honest non-variadic
+    #| functions that Raku's NativeCall can marshal correctly on
+    #| Apple arm64 (and Linux aarch64 — same AAPCS64 divergence
+    #| where named args go in registers but unnamed / variadic args
+    #| go on the stack). See src/vips_native_shim.c for the full
+    #| rationale.
+    #|
+    #| Non-fatal: if no C compiler is available, the shim won't be
+    #| compiled and FFI.rakumod falls back to direct variadic
+    #| bindings — which work on x86_64 (no ABI divergence there).
+    #| On arm64 without a shim, image loads may fail with garbage
+    #| "no property named `…`" errors; the warning below says so.
+    method !try-compile-shim($dist-path, IO::Path $stage) {
+        return if $*DISTRO.is-win;  # needs import libs; defer to prebuilt
+
+        my Str $os = $*KERNEL.name.lc;
+        my Str $ext = $os ~~ /darwin/ ?? 'dylib' !! 'so';
+        my IO::Path $shim = $stage.add("libvips_shim.$ext");
+        return if $shim.e;  # already shipped in the prebuilt bundle
+
+        my Str $src = "$dist-path/src/vips_native_shim.c";
+        return unless $src.IO.e;
+
+        # Ensure the stage dir exists — for system-libvips paths
+        # nothing else creates it.
+        $stage.mkdir;
+
+        my @cmd = do given $os {
+            when /darwin/ {
+                'cc', '-O2', '-dynamiclib', '-fPIC',
+                '-install_name', '@loader_path/libvips_shim.dylib',
+                # -undefined dynamic_lookup: symbols like
+                # vips_image_new_from_file resolve lazily at runtime
+                # from libvips (already loaded by NativeCall when the
+                # shim is first called). No link-time dep on libvips
+                # needed, which is important for the system-libvips
+                # fallback path where we don't have a staged
+                # libvips.42.dylib to link against.
+                '-undefined', 'dynamic_lookup',
+                '-o', $shim.Str, $src;
+            }
+            default {
+                'cc', '-O2', '-shared', '-fPIC',
+                '-o', $shim.Str, $src;
+            }
+        };
+
+        my $rc = run |@cmd, :out, :err;
+        my $out = $rc.out.slurp(:close);
+        my $err = $rc.err.slurp(:close);
+        if $rc.exitcode == 0 {
+            say "✅ Compiled varargs shim → $shim.";
+        }
+        else {
+            note "⚠️  Could not compile varargs shim ($shim): $err";
+            note "    Non-fatal on x86_64 (ABI overlap makes variadic "
+               ~ "calls work). On arm64 (macOS / Linux aarch64), image "
+               ~ "loads may fail with garbage 'no property named' errors "
+               ~ "— install a C toolchain (xcode-select --install / "
+               ~ "apt install build-essential) and reinstall Vips::Native.";
+        }
     }
 }

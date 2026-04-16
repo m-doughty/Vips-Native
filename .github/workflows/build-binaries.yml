@@ -549,6 +549,20 @@ jobs:
           # Convenience symlink for the unversioned name.
           ln -sf libvips.so.42 bundle/libvips.so
 
+          # Compile the varargs shim — same rationale as macOS.
+          # Linux aarch64 has the same AAPCS64 variadic ABI
+          # divergence as Apple arm64 (named args in registers,
+          # varargs on stack). The x86_64 ABI is forgiving (no
+          # register/stack split for varargs), but shipping the
+          # shim on both arches is cheap insurance and eliminates
+          # the latent UB entirely.
+          gcc -O2 -shared -fPIC \
+              -Wl,-soname,libvips_shim.so \
+              -o bundle/libvips_shim.so \
+              src/vips_native_shim.c \
+              -Lbundle -lvips
+          patchelf --set-rpath '$ORIGIN' bundle/libvips_shim.so
+
           echo "--- bundle contents ---"
           ls -la bundle/
 
@@ -687,6 +701,24 @@ jobs:
           if [[ ! -f bundle/libvips-42.dll ]]; then
               echo "❌ libvips-42.dll not staged — top-level copy regression."
               exit 1
+          fi
+
+          # Compile the varargs shim. build-win64-mxe ships import
+          # libraries alongside DLLs; we link the shim against the
+          # import lib so LoadLibrary resolves the dep at runtime via
+          # sibling-DLL search (PATH prepend from FFI.rakumod).
+          # GH windows-2022 has MinGW-w64 at C:\msys64\mingw64.
+          MINGW_GCC="/c/msys64/mingw64/bin/gcc.exe"
+          if [[ -x "$MINGW_GCC" ]]; then
+              "$MINGW_GCC" -O2 -shared \
+                  -o bundle/libvips_shim.dll \
+                  src/vips_native_shim.c \
+                  -Lbundle -lvips-42
+          else
+              echo "WARN: MinGW gcc not found at $MINGW_GCC — shim not compiled."
+              echo "      Windows x64 tests pass without it (ABI overlap)."
+              echo "      Windows arm64 would need it — add MinGW setup if"
+              echo "      an arm64 Raku runner ever becomes available."
           fi
 
       - name: Package archive
