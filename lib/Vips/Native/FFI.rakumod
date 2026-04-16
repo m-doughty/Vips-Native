@@ -76,6 +76,34 @@ sub _resolve-lib(Str $name, Str $short-name --> Str) {
     $short-name;
 }
 
+#| Set an env var that will actually be visible to C `getenv()` in
+#| the current process — not just to Raku's `%*ENV` view.
+#|
+#| Raku's `%*ENV<X> = Y` on macOS writes to a Raku-internal env
+#| table and *doesn't* propagate to the Darwin C runtime's
+#| `__environ` array; verified empirically by having libvips's
+#| `g_getenv("VIPSHOME")` return NULL despite Raku reporting the
+#| value set. Same class of issue as Windows' CRT-vs-kernel32
+#| env split. Libvips / GLib / anything linked against libc reads
+#| via `getenv(3)`, so we call `setenv(3)` directly via NativeCall.
+#|
+#| We still update `%*ENV` too: (a) Raku code and Raku tooling see
+#| the value, (b) subprocess spawns via `run`/`shell` inherit a
+#| correct environ.
+#|
+#| Windows has a separate `_putenv_s` CRT path and we don't use
+#| env vars for DLL lookup there (SetDllDirectoryW handles it), so
+#| this is a POSIX-only helper.
+sub _setenv-c(Str $name, Str $value) {
+    %*ENV{$name} = $value;
+    return if $*DISTRO.is-win;
+    use NativeCall;
+    # POSIX setenv: int setenv(const char *name, const char *value, int overwrite);
+    # overwrite=1 matches our "caller already checked existing value" contract.
+    my sub setenv(Str, Str, int32 --> int32) is native('c') { * };
+    setenv($name, $value, 1);
+}
+
 #| Runtime env setup for the staged-bundle case. Must run before
 #| NativeCall evaluates the `is native(...)` bindings below, since
 #| the first call through any of them triggers `LoadLibrary` /
@@ -182,7 +210,7 @@ sub _configure-runtime-env() {
     # name). Respects a user-set VIPSHOME so people pointing at a
     # custom vips install keep control.
     unless %*ENV<VIPSHOME> {
-        %*ENV<VIPSHOME> = $lib-dir.parent.Str;
+        _setenv-c('VIPSHOME', $lib-dir.parent.Str);
     }
 
     # Disable GIO extension-module loading entirely.
@@ -210,7 +238,7 @@ sub _configure-runtime-env() {
     # duplicate-class crash is ObjC-specific and GIO's module system
     # doesn't present the same way on Windows.
     if $os ~~ /darwin|linux/ && !%*ENV<GIO_MODULE_DIR> {
-        %*ENV<GIO_MODULE_DIR> = '/dev/null/vips-native-no-gio-modules';
+        _setenv-c('GIO_MODULE_DIR', '/dev/null/vips-native-no-gio-modules');
     }
 }
 _configure-runtime-env();
