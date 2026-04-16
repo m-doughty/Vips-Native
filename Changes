@@ -2,6 +2,162 @@ Revision history for Vips::Native
 
 {{$NEXT}}
 
+0.3.0  2026-04-16T02:48:04+01:00
+    - Root-caused the macOS image-load failures to a C varargs
+      ABI bug that had been latent across all platforms. libvips's
+      public API is entirely variadic (`vips_image_new_from_file
+      (filename, ...)` etc.), and Raku's NativeCall marshals every
+      declared argument according to the *non*-variadic ABI since
+      it has no way to mark a binding as variadic. On Apple arm64
+      specifically, the variadic ABI diverges: named args go in
+      registers (x0–x7), unnamed args go on the stack. When we
+      put our NULL terminator in a register, libvips read the
+      stack looking for the first vararg and found whatever
+      garbage happened to be there — error messages like
+      "pngload: no property named `\xa0\x13Yk\x01'" from bytes
+      that were stack memory, not a property name. Linux x86_64
+      and Windows x64 happened to work because their variadic
+      ABIs reuse the same registers as non-variadic for the
+      first several args.
+    - Fix: `src/vips_native_shim.c` — a tiny non-variadic shim
+      that wraps each variadic libvips entry point in C (where
+      the compiler knows the signature is variadic) and exposes
+      honest non-variadic symbols Raku's NativeCall can bind
+      directly. Shipped on all platforms where the ABI matters:
+        * macOS arm64: `libvips_shim.dylib` compiled in
+          build-binaries.yml, shipped in the prebuilt tarball.
+        * Linux x86_64 + aarch64: `libvips_shim.so` compiled
+          in build-binaries.yml, shipped in the prebuilt tarball.
+          aarch64 has the same AAPCS64 variadic divergence as
+          macOS arm64; x86_64 is defence-in-depth (eliminates
+          latent UB even though the current ABI happens to work).
+        * Windows: shim not yet compiled in prebuilt (needs
+          MinGW setup; x64 ABI overlap means tests pass without
+          it; arm64 Windows Raku doesn't exist yet). TODO
+          documented in build-binaries.yml.
+        * System-libvips fallback (all POSIX): Build.rakumod
+          compiles the shim at install time via `cc` with
+          `-undefined dynamic_lookup` (macOS) or plain `-shared`
+          (Linux). Symbols resolve lazily against the system
+          libvips already loaded by NativeCall. Non-fatal if no
+          C compiler present — falls back to direct variadic
+          bindings with a warning about arm64 risk.
+      FFI.rakumod detects the shim at module load and routes
+      the variadic entry points through it when present; falls
+      back to direct libvips bindings otherwise. Raku-facing
+      signatures unchanged — tests didn't need to move.
+    - test.yml: run prebuilt-path install + tests *before*
+      `brew install vips` / `apt install libvips-dev` so the
+      self-contained bundle is exercised with no system libvips
+      present. Also saves several minutes on every failed run
+      since the slow system-libvips install is only reached
+      after the fast path passes.
+    - BINARY_TAG bumped to binaries-vips-8.18.2-r7 (r6 shipped
+      without the shim on Linux/Windows; r7 includes it on all
+      platforms where we compile it).
+    - macOS build-binaries.yml: recursive transitive-dep bundler
+      for vips-modules. dylibbundler only follows link-time deps,
+      so the vips-* modules (heif/jxl/magick/openslide/poppler) —
+      which libvips dlopens at runtime — left their own deps
+      (libheif, libjxl, libMagickCore, libopenslide, libpoppler
+      and everything those transitively pulled, incl. libgio via
+      libpoppler-glib) pointing at Homebrew absolute paths. At
+      runtime on macOS, that meant dyld loaded Homebrew copies of
+      libgio alongside ours, lighting up the duplicate-ObjC-class
+      and duplicate-GObject-type registration paths and breaking
+      image loads on runners whose Homebrew glib happens to match
+      our bundled version. The new recursive pass walks every
+      module's otool -L deps, copies missing transitive deps into
+      bundle/ at top level with @loader_path-relative install_names,
+      and rewrites every ref so the whole bundle is self-contained.
+      Follows symlinks to copy the real file (keeps the ref-site
+      basename). Best-effort on @rpath refs via a brew-prefix find.
+      Post-bundle audit fails the build if any Mach-O still
+      references /opt/homebrew or /usr/local/Cellar — ship-time
+      guarantee that no surprise Homebrew lib gets loaded at
+      runtime. User-visible effect: full HEIF / JXL / Magick /
+      OpenSlide / Poppler support in the bundled install,
+      previously only available on the system-libvips fallback
+      path.
+    - BINARY_TAG bumped to binaries-vips-8.18.2-r5.
+    - FFI.rakumod: env var setup (VIPSHOME, GIO_MODULE_DIR) now
+      goes through a libc setenv(3) NativeCall, not Raku's %*ENV.
+      Raku's %*ENV<X> = Y on macOS writes to a Raku-internal env
+      table that *doesn't* propagate to Darwin's __environ array
+      — verified empirically: `getenv("VIPSHOME")` returns NULL
+      inside the same process where `%*ENV<VIPSHOME>` shows a
+      value. Same class of issue as Windows' CRT-vs-kernel32 split
+      we hit earlier for DLL search. libvips / GLib / everything
+      linked against libc reads via getenv(3), so we go through
+      libc directly. %*ENV is still updated too, so subprocess
+      spawns inherit a correct environ. This was the root cause
+      of the r3/r4 macOS test failures — VIPSHOME + GIO_MODULE_DIR
+      were set from Raku's perspective but completely invisible
+      to libvips, so libvips kept falling back to its compile-time
+      Homebrew prefix and loading Homebrew's modules (→ Homebrew's
+      libgio via transitive loads → ObjC dup-class crash).
+    - macOS: third pass on the r3 bundle fixes. r3 extracted
+      cleanly and libvips loaded, but libvips then searched
+      Homebrew's vips-modules-<ver> dir at init time and dlopened
+      Homebrew's modules — dragging in Homebrew's libgio
+      (duplicate ObjC class registration → GIO module scan bypass
+      didn't help, because the modules were vips's not GIO's).
+      Root-caused via VIPS-INFO diagnostics:
+        * I wrongly assumed libvips honours a VIPS_MODULEDIR env
+          var. It doesn't — libvips's `vips_guess_prefix` checks
+          VIPSHOME → probes argv[0] on PATH → falls back to
+          compile-time prefix. When argv[0] is `raku`, probe
+          fails; with no VIPSHOME set, libvips landed at Homebrew's
+          compile-time prefix. FFI.rakumod now sets VIPSHOME to
+          the staged parent dir; respects pre-set VIPSHOME.
+        * Our bundled libvips.42.dylib had LC_ID_DYLIB still set
+          to `/opt/homebrew/opt/vips/lib/libvips.42.dylib` —
+          dylibbundler only rewrites deps on its -x target, not
+          the target's own install_name. Added an explicit
+          install_name_tool -id '@loader_path/libvips.42.dylib'
+          post-dylibbundler so dyld identifies the bundled copy
+          as authoritative and doesn't double-load Homebrew's.
+        * Bundled modules dir was named `vips-modules` — libvips
+          computes the path as
+          `$VIPSHOME/lib/vips-modules-<major>.<minor>/` with the
+          version suffix. Preserve the exact dir name from the
+          source (`$(basename $MODULES_SRC)` → `vips-modules-8.18`
+          for Homebrew 8.18, `vips-modules-8.18` from build-win64-
+          mxe) so the runtime lookup resolves.
+    - BINARY_TAG bumped to binaries-vips-8.18.2-r4.
+    - macOS: point GIO_MODULE_DIR at a guaranteed-nonexistent path
+      (`/dev/null/vips-native-no-gio-modules`) at module load. Our
+      bundled libgio was compiled with GIO_MODULE_DIR baked to the
+      Homebrew cellar used to produce the bundle; at g_type_init
+      time, GIO scanned that dir and loaded extension modules built
+      against the *builder's* libgio, ending with two
+      libgio-2.0.0.dylibs in-process and duplicate ObjC class
+      registration (GNotificationCenterDelegate etc.) — which macOS
+      treats as a fatal load error. libvips only needs GIO's core
+      type system (statically linked into libgio itself); the
+      extension modules aren't touched by our tests, so disabling
+      module loading is safe. Applies on Linux too (same mechanism,
+      just doesn't crash without ObjC) for symmetry. Respects a
+      pre-set GIO_MODULE_DIR if the user wants to override.
+    - Second pass on the r2 macOS + Windows bundle fixes. r2
+      shipped broken:
+        * macOS: the modules-pass `dylibbundler -d bundle` call
+          re-entered bundle/ and rewrote libvips.42.dylib's own
+          install_names with the modules' `@loader_path/../`
+          prefix, breaking sibling-dep resolution (every lookup
+          landed in the parent dir where nothing was staged).
+          Replaced with direct install_name_tool -change walks
+          per module — bundle/ is now read-only with respect to
+          the modules pass.
+        * Windows: %*ENV<PATH> prepend didn't propagate to the
+          Win32 loader's DLL search. Added a direct
+          SetDllDirectoryW call via kernel32 (always pre-loaded)
+          alongside the PATH prepend so LoadLibrary finds bundled
+          sibling DLLs regardless of CRT/env-propagation state.
+    - BINARY_TAG bumped to binaries-vips-8.18.2-r3. The r2 release
+      artefacts remain published but are known-broken; do not
+      use. checksums.txt will refresh on the r3 release.
+
 0.2.2  2026-04-16T00:29:10+01:00
     - Fix macOS + Windows test failures against the
       binaries-vips-8.18.2-r1 archives by reworking the bundle
