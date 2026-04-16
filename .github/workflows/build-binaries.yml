@@ -370,6 +370,22 @@ jobs:
                   || { echo "❌ $mod failed verify"; exit 1; }
           done
 
+          # Compile the varargs shim (src/vips_native_shim.c) and
+          # link it against the bundled libvips. Raku's NativeCall
+          # can't marshal C variadics correctly under Apple arm64's
+          # ABI (named args in registers, varargs on stack — but
+          # NativeCall puts everything in registers because it
+          # doesn't know the callee is variadic). The shim gives
+          # every variadic libvips entry point an honest non-
+          # variadic signature so NativeCall marshals them
+          # correctly. See src/vips_native_shim.c for the full
+          # rationale and per-function wrappers.
+          cc -O2 -dynamiclib -fPIC \
+              -install_name '@loader_path/libvips_shim.dylib' \
+              -o bundle/libvips_shim.dylib \
+              src/vips_native_shim.c \
+              bundle/libvips.42.dylib
+
           # Symlinks for the unversioned name so resolution works
           # whether the caller asks for `libvips.dylib` or the
           # versioned `libvips.42.dylib`.

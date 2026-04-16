@@ -262,6 +262,44 @@ _configure-runtime-env();
 constant $vips-lib    is export = _resolve-lib('libvips',         'vips');
 constant $gobject-lib is export = _resolve-lib('libgobject-2.0',  'gobject-2.0');
 
+# --- Varargs ABI shim ---
+#
+# libvips's public API is heavily variadic: every loader, saver,
+# and operation takes a NULL-terminated (key, value, ...) option
+# list. Raku's NativeCall can't mark a bound C function as
+# variadic, so it marshals every declared argument according to
+# the *non*-variadic ABI. On Apple arm64 specifically, that
+# diverges from the variadic ABI — named args go in registers
+# (x0–x7) for both, but unnamed / variadic args go on the stack
+# for variadic calls and in registers for non-variadic. When our
+# binding declares the NULL terminator as a fixed arg, NativeCall
+# puts it in register x1, libvips reads the stack looking for the
+# first vararg, finds random memory there, and fails with
+# "pngload: no property named `<garbage>`".
+#
+# Linux x86_64 and Windows x64 happen not to exhibit the bug
+# because their variadic ABIs reuse the same registers as
+# non-variadic for the first several args, so our register-based
+# marshal accidentally works. arm64 Apple is the platform that
+# actually surfaces the ABI lie.
+#
+# The fix is a tiny C shim (src/vips_native_shim.c) with honest
+# non-variadic signatures. On macOS, build-binaries.yml compiles
+# it into libvips_shim.dylib and ships it in the staged bundle
+# alongside libvips. When present, we bind the variadic entry
+# points through the shim; when absent (other platforms, or a
+# future macOS bundle pre-dating this fix), we fall back to the
+# direct libvips bindings that happen to work there.
+sub _resolve-shim-lib(--> Str) {
+    with _staged-lib-dir() -> $dir {
+        return Str unless $dir.d;
+        with _find-in($dir, 'libvips_shim') { return $_ }
+    }
+    Str;
+}
+constant $shim-lib is export = _resolve-shim-lib();
+my Bool $USE-SHIM = $shim-lib.defined && $shim-lib.IO.f;
+
 # VipsInteresting
 constant VIPS_INTERESTING_NONE      is export = 0;
 constant VIPS_INTERESTING_CENTRE    is export = 1;
@@ -291,40 +329,74 @@ sub vips_init(Str --> int32) is native($vips-lib) is export { * }
 # VipsImage* is just an OpaquePointer
 class VipsImage is repr('CPointer') is export { }
 
-# vips_image_new_from_file(const char* name, ...)
-sub vips_image_new_from_file(Str, Str --> VipsImage) is native($vips-lib) is export { * }
+# --- vips_image_new_from_file(const char *, ...) ---
+# Shim: vips_shim_image_new_from_file(const char *) → VipsImage*
+sub _vips-load-shim(Str --> VipsImage)
+    is native($shim-lib // '')
+    is symbol('vips_shim_image_new_from_file') { * };
+sub _vips-load-direct(Str, Str --> VipsImage)
+    is native($vips-lib)
+    is symbol('vips_image_new_from_file') { * };
+sub vips_image_new_from_file(Str $filename, Str $null = Str --> VipsImage) is export {
+    $USE-SHIM ?? _vips-load-shim($filename)
+              !! _vips-load-direct($filename, $null);
+}
 
-# Get dimensions
+# Get dimensions — non-variadic, bind directly.
 sub vips_image_get_width(VipsImage --> int32) is native($vips-lib) is export { * }
 sub vips_image_get_height(VipsImage --> int32) is native($vips-lib) is export { * }
 
-# Smartcrop
+# --- vips_smartcrop(VipsImage*, VipsImage**, int, int, ...) ---
+# Shim: vips_shim_smartcrop(in, out, w, h, interesting) → int
+sub _vips-smartcrop-shim(
+    VipsImage, CArray[VipsImage], int32, int32, int32 --> int32)
+    is native($shim-lib // '')
+    is symbol('vips_shim_smartcrop') { * };
+sub _vips-smartcrop-direct(
+    VipsImage, CArray[VipsImage], int32, int32,
+    Str, int32, Str --> int32)
+    is native($vips-lib)
+    is symbol('vips_smartcrop') { * };
 sub vips_smartcrop(
-	VipsImage,              # in
-	CArray[VipsImage],      # out (pointer to VipsImage*)
-	int32,                     # width
-	int32,                     # height
-	Str,                       # "interesting"
-	int32,                     # VIPS_INTERESTING_*
-	Str                        # NULL terminator for varargs
-) returns int32 is native($vips-lib) is export { * }
+    VipsImage $in, CArray[VipsImage] $out,
+    int32 $w, int32 $h,
+    Str $key, int32 $interesting, Str $null --> int32
+) is export {
+    $USE-SHIM ?? _vips-smartcrop-shim($in, $out, $w, $h, $interesting)
+              !! _vips-smartcrop-direct($in, $out, $w, $h, $key, $interesting, $null);
+}
 
-# Resize
+# --- vips_resize(VipsImage*, VipsImage**, double, ...) ---
+# Shim: vips_shim_resize(in, out, scale, kernel) → int
+sub _vips-resize-shim(
+    VipsImage, CArray[VipsImage], num64, int32 --> int32)
+    is native($shim-lib // '')
+    is symbol('vips_shim_resize') { * };
+sub _vips-resize-direct(
+    VipsImage, CArray[VipsImage], num64, Str, int32, Str --> int32)
+    is native($vips-lib)
+    is symbol('vips_resize') { * };
 sub vips_resize(
-	VipsImage,                 # in
-	CArray[VipsImage],         # out (pointer to VipsImage*)
-	num64,                     # scale
-	Str,                       # "kernel"
-	int32,                     # VIPS_KERNEL_*
-	Str                        # NULL terminator for varargs
-) returns int32 is native($vips-lib) is export { * }
+    VipsImage $in, CArray[VipsImage] $out,
+    num64 $scale,
+    Str $key, int32 $kernel, Str $null --> int32
+) is export {
+    $USE-SHIM ?? _vips-resize-shim($in, $out, $scale, $kernel)
+              !! _vips-resize-direct($in, $out, $scale, $key, $kernel, $null);
+}
 
-# Save PNG
-sub vips_pngsave(
-	VipsImage,                  # in
-	Str,                        # filename
-	Str                         # NULL terminator for varargs
-) returns int32 is native($vips-lib) is export { * }
+# --- vips_pngsave(VipsImage*, const char *, ...) ---
+# Shim: vips_shim_pngsave(in, filename) → int
+sub _vips-pngsave-shim(VipsImage, Str --> int32)
+    is native($shim-lib // '')
+    is symbol('vips_shim_pngsave') { * };
+sub _vips-pngsave-direct(VipsImage, Str, Str --> int32)
+    is native($vips-lib)
+    is symbol('vips_pngsave') { * };
+sub vips_pngsave(VipsImage $in, Str $filename, Str $null --> int32) is export {
+    $USE-SHIM ?? _vips-pngsave-shim($in, $filename)
+              !! _vips-pngsave-direct($in, $filename, $null);
+}
 
 # Memory cleanup for images (from GLib/GObject)
 sub g_object_unref(VipsImage) is native($gobject-lib) is export { * }

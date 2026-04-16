@@ -35,16 +35,20 @@ jobs:
         with:
           raku-version: 'latest'
 
-      - name: Install system libvips
-        if: matrix.install-system-libvips != ''
-        shell: bash
-        run: ${{ matrix.install-system-libvips }}
-
       # ---------------------------------------------------------
       # Prebuilt path: zef install runs Build.rakumod which
       # downloads the prebuilt, SHA-verifies, stages to the XDG
       # data dir under real filenames. Native.rakumod's resolver
       # finds the staged libs via the XDG-staged-dir branch.
+      #
+      # Deliberately run BEFORE `brew install vips` on macOS (and
+      # before `apt install libvips-dev` on Linux) so this pass
+      # exercises the self-contained bundle with *no* system
+      # libvips present — proves dyld / NativeCall doesn't
+      # accidentally pick up a system copy. Also saves ~3 min of
+      # `brew install vips` time on every failed run, since the
+      # slow system-libvips install only happens after we've
+      # confirmed the fast path works.
       # ---------------------------------------------------------
       - name: Install Vips::Native via prebuilt path
         run: zef install --/test .
@@ -151,6 +155,11 @@ jobs:
       # to fall back to (matrix entry has empty
       # install-system-libvips).
       # ---------------------------------------------------------
+      - name: Install system libvips
+        if: matrix.install-system-libvips != ''
+        shell: bash
+        run: ${{ matrix.install-system-libvips }}
+
       - name: Install Vips::Native via system-libvips path
         if: matrix.install-system-libvips != ''
         env:
