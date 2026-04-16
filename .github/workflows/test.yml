@@ -54,7 +54,52 @@ jobs:
 
       - name: Run unit tests — prebuilt path
         shell: bash
+        env:
+          # Makes libvips and GLib chatty on stderr. Test output is
+          # mostly TAP on stdout, so the extra log lines don't break
+          # the plan parser. If a load fails, we get the real error
+          # instead of a silent NULL return.
+          VIPS_WARNING: '1'
+          VIPS_INFO: '1'
+          G_MESSAGES_DEBUG: 'all'
         run: prove6 --verbose -I lib t
+
+      # Diagnostic — only runs if prove6 just failed. Dumps the
+      # full FFI/runtime picture so the next push doesn't need to
+      # re-guess. Kept out of the success path to avoid noise.
+      - name: Diagnose macOS prebuilt failures
+        if: failure() && runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -x
+          echo "=== resolved lib paths ==="
+          raku -Ilib -e '
+            use Vips::Native::FFI;
+            say "vips-lib:       $vips-lib";
+            say "gobject-lib:    $gobject-lib";
+            say "VIPS_MODULEDIR: ", %*ENV<VIPS_MODULEDIR> // "(unset)";
+            say "GIO_MODULE_DIR: ", %*ENV<GIO_MODULE_DIR> // "(unset)";
+          '
+          echo "=== staged dir ==="
+          ls -la "$HOME/.local/share/Vips-Native/"*/lib 2>&1 | head -80
+          echo "=== codesign libvips.42.dylib ==="
+          codesign -dvvv "$HOME"/.local/share/Vips-Native/*/lib/libvips.42.dylib 2>&1 || true
+          echo "=== otool libvips.42.dylib ==="
+          otool -L "$HOME"/.local/share/Vips-Native/*/lib/libvips.42.dylib 2>&1 | head -40
+          echo "=== vips_error_buffer after failed PNG load ==="
+          raku -Ilib -e '
+            use Vips::Native::FFI;
+            use NativeCall;
+            sub vips_error_buffer(--> Str) is native($vips-lib) { * };
+            sub vips_error_clear()        is native($vips-lib) { * };
+            vips_error_clear();
+            my $rc = vips_init("diag");
+            say "vips_init = $rc";
+            say "post-init error: ", vips_error_buffer() // "(null)";
+            my $img = vips_image_new_from_file("t/fixtures/camelia.png", Str);
+            say "image defined: ", $img.defined;
+            say "vips error: ", vips_error_buffer() // "(null)";
+          ' 2>&1 || true
 
       # ---------------------------------------------------------
       # System-libvips fallback path. Two things matter for this
