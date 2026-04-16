@@ -100,8 +100,24 @@ sub _setenv-c(Str $name, Str $value) {
     use NativeCall;
     # POSIX setenv: int setenv(const char *name, const char *value, int overwrite);
     # overwrite=1 matches our "caller already checked existing value" contract.
-    my sub setenv(Str, Str, int32 --> int32) is native('c') { * };
-    setenv($name, $value, 1);
+    #
+    # Library name varies by platform:
+    #   macOS:  'c' → /usr/lib/libSystem.B.dylib (works)
+    #   Linux:  'libc.so.6' → glibc. NativeCall's default 'c' lookup
+    #           appends '.so' to get 'libc.so', which on Debian/Ubuntu
+    #           is a *linker script* (GROUP ( /lib/.../libc.so.6 )),
+    #           not a shared object — dlopen chokes on the ELF header
+    #           check. The versioned SONAME bypasses that.
+    my sub mac_setenv(Str, Str, int32 --> int32)
+        is native('c') is symbol('setenv') { * };
+    my sub linux_setenv(Str, Str, int32 --> int32)
+        is native('libc.so.6') is symbol('setenv') { * };
+    if $*KERNEL.name.lc ~~ /darwin/ {
+        mac_setenv($name, $value, 1);
+    }
+    else {
+        linux_setenv($name, $value, 1);
+    }
 }
 
 #| Runtime env setup for the staged-bundle case. Must run before
