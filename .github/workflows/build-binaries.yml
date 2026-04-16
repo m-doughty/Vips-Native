@@ -241,7 +241,12 @@ jobs:
                           # failures in dlopen, which is exactly the
                           # class of bug this bundler exists to
                           # prevent.
-                          actual=$(find "$BREW_PREFIX" -maxdepth 6 \
+                          # -L tells find to follow symlinks so it can
+                          # resolve Homebrew's /opt/homebrew/opt/<formula>
+                          # → /opt/homebrew/Cellar/<formula>/<ver> link
+                          # scheme. Without -L, `-type f` rejects the
+                          # symlink and misses the real file behind it.
+                          actual=$(find -L "$BREW_PREFIX" -maxdepth 6 \
                               -name "$base" -type f 2>/dev/null \
                               | head -n1)
                           if [[ -z "$actual" ]]; then
