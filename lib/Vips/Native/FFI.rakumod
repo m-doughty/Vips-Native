@@ -155,15 +155,34 @@ sub _configure-runtime-env() {
         }
     }
 
-    # Bundle layout: $lib-dir holds libvips + its siblings; format
-    # loader plugins live in $lib-dir/vips-modules/ (child, not
-    # sibling — the tarball is extracted into $lib-dir and contains
-    # a top-level vips-modules/ entry). Only set if present — avoids
-    # pointing vips at a non-existent dir, which would make it skip
-    # its default search and miss system-installed modules entirely.
-    my $modules = $lib-dir.add('vips-modules');
-    if $modules.d && !%*ENV<VIPS_MODULEDIR> {
-        %*ENV<VIPS_MODULEDIR> = $modules.Str;
+    # Make libvips look at OUR bundle for its modules instead of
+    # the builder's compile-time prefix.
+    #
+    # libvips has no VIPS_MODULEDIR env var (I assumed there was
+    # one; there isn't). At init time it uses `vips_guess_prefix`,
+    # which tries in order:
+    #   1. $VIPSHOME env var
+    #   2. Probe `argv[0]` on PATH to find the vips install tree
+    #   3. Compile-time VIPS_PREFIX (baked at build)
+    #
+    # When the entry-point binary isn't `vips` (e.g. `raku`), the
+    # argv[0] probe fails and libvips falls back to the compile-time
+    # prefix — which on our Homebrew-bottle-sourced macOS bundle is
+    # `/opt/homebrew/Cellar/vips/<ver>`. libvips then enumerates
+    # Homebrew's vips-modules-<major>.<minor>/ and dlopens each
+    # module; those modules have LC_LOAD_DYLIBs against Homebrew's
+    # libgio / libglib / etc. — which drags Homebrew's libgio into
+    # the process alongside our bundled one and lights up macOS's
+    # duplicate-ObjC-class crash.
+    #
+    # Setting VIPSHOME shortcuts the argv[0] probe. libvips computes
+    # the module dir as $VIPSHOME/lib/vips-modules-<M>.<m>/, which
+    # is exactly where build-binaries.yml stages our bundled modules
+    # (preserving Homebrew's / build-win64-mxe's versioned dir
+    # name). Respects a user-set VIPSHOME so people pointing at a
+    # custom vips install keep control.
+    unless %*ENV<VIPSHOME> {
+        %*ENV<VIPSHOME> = $lib-dir.parent.Str;
     }
 
     # Disable GIO extension-module loading entirely.

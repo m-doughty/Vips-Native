@@ -119,6 +119,19 @@ jobs:
               -s "$BREW_PREFIX/opt/gettext/lib" \
               -s "$BREW_PREFIX/opt/libffi/lib"
 
+          # dylibbundler rewrites dependency refs on its -x input
+          # but leaves the input's own LC_ID_DYLIB (install_name)
+          # alone. That means our bundled libvips.42.dylib still
+          # advertises itself as
+          # `/opt/homebrew/opt/vips/lib/libvips.42.dylib`, which
+          # causes dyld to treat it as if loaded from that path and
+          # can trigger a second libvips being loaded from the
+          # Homebrew location later. Rewrite the id to a self-
+          # referential @loader_path form so dyld identifies the
+          # bundled copy as authoritative.
+          install_name_tool -id '@loader_path/libvips.42.dylib' \
+              bundle/libvips.42.dylib
+
           # vips 8.15+ splits format loaders (pngload, jpegload,
           # heifload, webpsave, …) into separately-dlopen'd modules
           # under $VIPS_CELLAR/lib/vips-modules-<abi>/. dylibbundler
@@ -143,17 +156,21 @@ jobs:
               ls -la "$VIPS_CELLAR/lib"
               exit 1
           fi
-          mkdir -p bundle/vips-modules
+          # Preserve Homebrew's dir name verbatim — libvips computes
+          # the module search path as $VIPSHOME/lib/vips-modules-<M>.<m>/
+          # at runtime (FFI.rakumod sets VIPSHOME to the staged parent),
+          # so the bundle's dir name has to match exactly or libvips
+          # finds nothing. Renaming to a plain "vips-modules" here
+          # would break the prefix lookup.
+          MODULES_BASENAME=$(basename "$MODULES_SRC")
+          MODULES_DEST="bundle/$MODULES_BASENAME"
+          mkdir -p "$MODULES_DEST"
           # Show what's actually in there before copying — helps
           # diagnose future layout changes (e.g. Homebrew switching
           # to static loaders would leave this dir empty, which we
           # want to fail loudly on, not silently).
           echo "--- $MODULES_SRC contents ---"
           ls -la "$MODULES_SRC"
-          # Copy whatever's in the modules dir — extension varies by
-          # platform + vips build (.so on macOS via GIOModule, no
-          # extension on some, .dylib on older installs). Narrowing
-          # with *.so would miss everything if the glob doesn't match.
           module_count=$(find "$MODULES_SRC" -maxdepth 1 -type f | wc -l)
           if (( module_count == 0 )); then
               echo "❌ $MODULES_SRC is empty — Homebrew vips may have"
@@ -161,7 +178,7 @@ jobs:
               echo "   investigate before publishing."
               exit 1
           fi
-          cp "$MODULES_SRC"/* bundle/vips-modules/
+          cp "$MODULES_SRC"/* "$MODULES_DEST"/
 
           # Rewrite each module's inter-lib refs: their upstream
           # install_names point at absolute Cellar paths (or @rpath)
@@ -178,7 +195,7 @@ jobs:
           # install_name_tool keeps the modules pass read-only with
           # respect to bundle/.
           shopt -s nullglob
-          for mod in bundle/vips-modules/*; do
+          for mod in "$MODULES_DEST"/*; do
               [[ -L "$mod" ]] && continue
               [[ -f "$mod" ]] || continue
               file "$mod" | grep -q 'Mach-O' || continue
@@ -217,9 +234,9 @@ jobs:
             -exec codesign --force --sign - --timestamp=none {} \;
           # Format-loader modules are typically .so on macOS (glib's
           # GIOModule convention) but suffix varies — codesign every
-          # regular Mach-O file under vips-modules/ regardless of
+          # regular Mach-O file under the modules dir regardless of
           # extension.
-          find bundle/vips-modules -type f ! -type l | while read -r mod; do
+          find "$MODULES_DEST" -type f ! -type l | while read -r mod; do
               file "$mod" | grep -q 'Mach-O' || continue
               codesign --force --sign - --timestamp=none "$mod"
           done
@@ -227,7 +244,7 @@ jobs:
             [[ -L "$f" ]] && continue
             codesign --verify "$f" || { echo "❌ $f failed verify"; exit 1; }
           done
-          find bundle/vips-modules -type f ! -type l | while read -r mod; do
+          find "$MODULES_DEST" -type f ! -type l | while read -r mod; do
               file "$mod" | grep -q 'Mach-O' || continue
               codesign --verify "$mod" \
                   || { echo "❌ $mod failed verify"; exit 1; }
@@ -501,13 +518,16 @@ jobs:
           # VIPS_MODULEDIR to <staged-lib>/vips-modules at load time
           # so libvips finds them here.
           # Subdir name is versioned (e.g. vips-modules-8.18) — glob
-          # it and let find pick the first match. FFI.rakumod reads
-          # this as $lib-dir/vips-modules, so rename on copy.
+          # it and let find pick the first match. Preserve that exact
+          # name on copy so libvips's runtime module path
+          # ($VIPSHOME/lib/vips-modules-<M>.<m>/, set by FFI.rakumod)
+          # finds our staged copy.
           WIN_MODULES_SRC=$(find "$EXTRACT_DIR/bin" -maxdepth 1 -type d \
               -name 'vips-modules-*' | head -n1)
           if [[ -n "$WIN_MODULES_SRC" ]]; then
-              mkdir -p bundle/vips-modules
-              cp "$WIN_MODULES_SRC"/*.dll bundle/vips-modules/
+              WIN_MODULES_BASENAME=$(basename "$WIN_MODULES_SRC")
+              mkdir -p "bundle/$WIN_MODULES_BASENAME"
+              cp "$WIN_MODULES_SRC"/*.dll "bundle/$WIN_MODULES_BASENAME"/
           else
               # Static-loader vips would make this a no-op, but
               # build-win64-mxe has used split modules since 8.15+;
@@ -523,9 +543,9 @@ jobs:
           echo "--- bundle/ (top-level) ---"
           ls -la bundle/
           echo "(total top-level: $(find bundle -maxdepth 1 -type f | wc -l) files)"
-          echo "--- bundle/vips-modules/ ---"
-          ls -la bundle/vips-modules/
-          echo "(total modules: $(find bundle/vips-modules -type f | wc -l) files)"
+          echo "--- bundle/$WIN_MODULES_BASENAME/ ---"
+          ls -la "bundle/$WIN_MODULES_BASENAME/"
+          echo "(total modules: $(find "bundle/$WIN_MODULES_BASENAME" -type f | wc -l) files)"
           # Explicit sanity check — the sibling-DLL path fix is useless
           # if the entry-point DLL itself isn't in the bundle.
           if [[ ! -f bundle/libvips-42.dll ]]; then
