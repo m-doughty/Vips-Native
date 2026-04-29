@@ -728,16 +728,61 @@ jobs:
               exit 1
           fi
 
-          # TODO: compile the varargs shim for Windows. Currently
-          # skipped because build-win64-mxe ships GNU-format import
-          # libs (.dll.a) that cl.exe can't link against, and MinGW
-          # gcc isn't pre-installed on windows-2022 runners. Would
-          # need `pacman -S mingw-w64-x86_64-gcc` (x64) or a cross-
-          # compiler for arm64. x64 tests pass without the shim
-          # (ABI overlap); arm64 Windows + Raku doesn't exist yet
-          # but would need the shim (same AAPCS64 divergence as
-          # macOS arm64). Add when either arm64 Windows Raku
-          # appears or we want defence-in-depth on x64.
+      - name: Compile varargs shim (x86_64 only)
+        if: matrix.platform == 'windows-x86_64'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          # The Windows shim is required for `letterbox-to-buffer`
+          # (and the underlying vips_flatten / vips_embed bindings),
+          # which take a VipsArrayDouble* option that's awkward to
+          # build from Raku without going through C. Without the
+          # shim those bindings die at runtime with "requires the
+          # libvips_shim".
+          #
+          # build-win64-mxe ships GNU-format .dll.a import libs in
+          # $EXTRACT_DIR/lib — perfect for MinGW gcc, useless for
+          # cl.exe. windows-2022 runners pre-install MinGW-w64 at
+          # C:\msys64\mingw64\bin, so we invoke gcc directly via the
+          # absolute path (avoids fiddling with the msys2 shell or
+          # PATH). At runtime the shim's DLL imports point at
+          # libvips-42.dll and libglib-2.0-0.dll, which FFI.rakumod
+          # makes loadable via PATH + SetDllDirectoryW pointing at
+          # the staged lib dir.
+          GCC='/c/msys64/mingw64/bin/gcc.exe'
+          if [[ ! -x "$GCC" ]]; then
+            echo "❌ MinGW-w64 gcc not found at $GCC."
+            echo "   windows-2022 runner image may have changed — see"
+            echo "   https://github.com/actions/runner-images for current toolchain."
+            ls /c/msys64/mingw64/bin/ 2>&1 | head -20 || true
+            exit 1
+          fi
+
+          "$GCC" -O2 -shared \
+              -o bundle/libvips_shim.dll \
+              src/vips_native_shim.c \
+              -L"$EXTRACT_DIR/lib" \
+              -lvips -lglib-2.0
+
+          # Verify our exports are actually in the DLL — guards
+          # against silent link failure with the import libs.
+          NM='/c/msys64/mingw64/bin/nm.exe'
+          if [[ -x "$NM" ]]; then
+            echo "--- libvips_shim.dll exports ---"
+            "$NM" -g --defined-only bundle/libvips_shim.dll \
+                | grep -E 'T (_)?vips_shim_' || {
+                  echo "❌ no vips_shim_* exports — link likely silent-failed."
+                  exit 1
+                }
+          fi
+
+      # arm64 Windows: the shim isn't built. arm64 Windows Raku
+      # doesn't exist yet, so nothing actually exercises the
+      # NativeCall variadic ABI bug there. Cross-compiling from a
+      # windows-2022 (x86_64) runner needs an aarch64 MinGW-w64
+      # cross compiler that isn't pre-installed on the image — add
+      # when either arm64 Windows Raku ships or we have a runner
+      # available with the cross toolchain.
 
       - name: Package archive
         run: |

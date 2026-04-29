@@ -102,6 +102,12 @@ sub smart-resize(
     we copy out of vips_image_write_to_memory's g_malloc'd buffer
     and release the source via vips_shim_free, so there's no
     GC-vs-libvips ownership trap.
+
+    Platforms: macOS arm64, Linux x86_64 + aarch64 (glibc), and
+    Windows x86_64 are supported. Windows arm64 doesn't run Raku
+    yet; the prebuilt for that platform omits the shim, so
+    C<letterbox-to-buffer> dies with a "requires libvips_shim"
+    message there until Raku ships an arm64 Windows build.
     )
 sub letterbox-to-buffer(
     IO::Path() $path,
