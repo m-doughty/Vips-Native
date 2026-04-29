@@ -9,128 +9,89 @@ use Vips::Native;
 #   - Alpha composited onto @bg
 #
 # The fixture is camelia.png (512x385 — landscape, non-square).
+#
+# Note on test layout: this file deliberately uses flat assertions
+# rather than subtests. CI runs `prove6 --verbose` with VIPS_INFO=1
+# and G_MESSAGES_DEBUG=all (see .github/workflows/test.yml) for
+# diagnostic chatter; libvips's unindented `VIPS-INFO:` lines
+# interleave with the indented stream prove6 expects inside a
+# subtest, breaking TAP plan-parsing. Flat assertions tolerate
+# the chatter cleanly because there's no plan structure mid-test.
 
 constant FIXTURE = 't/fixtures/camelia.png';
 constant SIZE    = 64;     # tiny so tests run fast
 constant LARGER  = 128;
 
-plan 6;
-
-# 1. Buffer size always matches size×size×3 ----------------------------------
-
-subtest 'buffer length is exactly size*size*3', {
-    plan 2;
-    my $small = letterbox-to-buffer(FIXTURE.IO, :size(SIZE));
-    is $small.bytes, SIZE * SIZE * 3,
-        "size=64 → {SIZE * SIZE * 3} bytes";
-
-    my $bigger = letterbox-to-buffer(FIXTURE.IO, :size(LARGER));
-    is $bigger.bytes, LARGER * LARGER * 3,
-        "size=128 → {LARGER * LARGER * 3} bytes";
-};
-
-# 2. Letterbox bands are exactly the @bg colour ------------------------------
-#
-# camelia.png is 512x385 — landscape with a wider than tall aspect ratio.
-# Letterbox to 64×64 with white background should produce horizontal
-# top + bottom white bands (the image fills the middle horizontally).
-#
-# Math: scale = 64/512 = 0.125 → 64×48 image, embedded at y=8 inside
-# 64x64 canvas. Rows 0–7 and 56–63 should be all white.
-
-subtest 'top + bottom letterbox bands are pure white (default bg)', {
-    plan 4;
-    my $buf = letterbox-to-buffer(FIXTURE.IO, :size(SIZE));
-
-    # Top row (y=0): every pixel should be (255, 255, 255)
-    my $top-pure = (^SIZE).map(-> $x {
-        my $i = (0 * SIZE + $x) * 3;
-        $buf[$i] == 255 && $buf[$i + 1] == 255 && $buf[$i + 2] == 255;
-    }).all;
-    ok $top-pure, "row 0 is pure white";
-
-    # Top-band row (y=4): still in the band, should be white
-    my $band-pure = (^SIZE).map(-> $x {
-        my $i = (4 * SIZE + $x) * 3;
-        $buf[$i] == 255 && $buf[$i + 1] == 255 && $buf[$i + 2] == 255;
-    }).all;
-    ok $band-pure, "row 4 is pure white (still in top band)";
-
-    # Bottom row (y=63): pure white
-    my $bot-pure = (^SIZE).map(-> $x {
-        my $i = (63 * SIZE + $x) * 3;
-        $buf[$i] == 255 && $buf[$i + 1] == 255 && $buf[$i + 2] == 255;
-    }).all;
-    ok $bot-pure, "row 63 is pure white";
-
-    # Middle row (y=32): should NOT be all white (image data is there)
-    my $mid-all-white = (^SIZE).map(-> $x {
-        my $i = (32 * SIZE + $x) * 3;
-        $buf[$i] == 255 && $buf[$i + 1] == 255 && $buf[$i + 2] == 255;
-    }).all;
-    nok $mid-all-white, "row 32 is NOT all white (has image content)";
-};
-
-# 3. Custom background colour respected --------------------------------------
-
-subtest 'custom @bg fills the letterbox region', {
-    plan 3;
-    my $red = letterbox-to-buffer(FIXTURE.IO, :size(SIZE), bg => (255, 0, 0));
-
-    # Top row should be pure red
-    my $top-red = (^SIZE).map(-> $x {
-        my $i = (0 * SIZE + $x) * 3;
-        buf-rgb($red, $i) ~~ (255, 0, 0);
-    }).all;
-    ok $top-red, "top row is pure red with @bg=(255, 0, 0)";
-
-    my $blue = letterbox-to-buffer(FIXTURE.IO, :size(SIZE), bg => (0, 0, 255));
-    my $top-blue = (^SIZE).map(-> $x {
-        my $i = (0 * SIZE + $x) * 3;
-        buf-rgb($blue, $i) ~~ (0, 0, 255);
-    }).all;
-    ok $top-blue, "top row is pure blue with @bg=(0, 0, 255)";
-
-    my $green = letterbox-to-buffer(FIXTURE.IO, :size(SIZE), bg => (0, 255, 0));
-    my $top-green = (^SIZE).map(-> $x {
-        my $i = (0 * SIZE + $x) * 3;
-        buf-rgb($green, $i) ~~ (0, 255, 0);
-    }).all;
-    ok $top-green, "top row is pure green with @bg=(0, 255, 0)";
-};
-
-# 4. Square output is square: width == height in the buffer layout ----------
-# This sanity-checks our index math by reading the same x-column at two
-# different y values and confirming it's a sensible row offset.
-
-subtest 'buffer index math: stride is size*3 per row', {
-    plan 1;
-    my $buf = letterbox-to-buffer(FIXTURE.IO, :size(SIZE));
-    # Pixel at (x=10, y=0): RGB at byte offset 30
-    # Pixel at (x=10, y=1): RGB at byte offset 30 + SIZE*3 = 222
-    # If our layout is correct, both reads should land within the buffer.
-    my $first  = ($buf[30],     $buf[31],     $buf[32]);
-    my $second = ($buf[30+SIZE*3], $buf[31+SIZE*3], $buf[32+SIZE*3]);
-    ok $first.elems == 3 && $second.elems == 3,
-        "row stride {SIZE*3} bytes addressable in a {SIZE*SIZE*3}-byte buffer";
-};
-
-# 5. Missing file fails cleanly ---------------------------------------------
-
-subtest 'missing file fails', {
-    plan 1;
-    my $r = letterbox-to-buffer('/nonexistent/path.png'.IO, :size(SIZE));
-    nok $r.so, "letterbox of missing file → fails";
-};
-
-# 6. UInt :$size default is 448 ---------------------------------------------
-
-subtest 'default :size is 448', {
-    plan 1;
-    my $buf = letterbox-to-buffer(FIXTURE.IO);
-    is $buf.bytes, 448 * 448 * 3, "default size yields 448×448×3 = 602112 bytes";
-};
+plan 13;
 
 sub buf-rgb($buf, Int $i) {
     ($buf[$i], $buf[$i+1], $buf[$i+2]).List
 }
+
+sub all-white-row($buf, Int $row, Int $size --> Bool) {
+    (^$size).map(-> $x {
+        my $i = ($row * $size + $x) * 3;
+        $buf[$i] == 255 && $buf[$i+1] == 255 && $buf[$i+2] == 255
+    }).all.so
+}
+
+sub all-row-rgb($buf, Int $row, Int $size, Int $r, Int $g, Int $b --> Bool) {
+    (^$size).map(-> $x {
+        my $i = ($row * $size + $x) * 3;
+        $buf[$i] == $r && $buf[$i+1] == $g && $buf[$i+2] == $b
+    }).all.so
+}
+
+# 1-2: Buffer length always matches size×size×3 -----------------------------
+
+my $small = letterbox-to-buffer(FIXTURE.IO, :size(SIZE));
+is $small.bytes, SIZE * SIZE * 3, "size=64 → {SIZE * SIZE * 3} bytes";
+
+my $bigger = letterbox-to-buffer(FIXTURE.IO, :size(LARGER));
+is $bigger.bytes, LARGER * LARGER * 3, "size=128 → {LARGER * LARGER * 3} bytes";
+
+# 3-6: White letterbox bands top + bottom (camelia is landscape) -----------
+
+# camelia.png is 512x385 — wider than tall. Letterbox to 64×64 with white
+# background should produce horizontal top + bottom white bands; image
+# fills the middle. Math: scale = 64/512 = 0.125 → 64×48 image, embedded
+# at y=8 inside 64x64 canvas. Rows 0–7 and 56–63 should be all white.
+ok all-white-row($small, 0,  SIZE), 'row 0 is pure white';
+ok all-white-row($small, 4,  SIZE), 'row 4 is pure white (still in top band)';
+ok all-white-row($small, 63, SIZE), 'row 63 is pure white (bottom band)';
+nok all-white-row($small, 32, SIZE), 'row 32 is NOT all white (image content)';
+
+# 7-9: Custom background colours ------------------------------------------
+
+my $red   = letterbox-to-buffer(FIXTURE.IO, :size(SIZE), bg => (255, 0, 0));
+ok all-row-rgb($red,   0, SIZE, 255, 0,   0  ), 'top row red with @bg=(255,0,0)';
+
+my $blue  = letterbox-to-buffer(FIXTURE.IO, :size(SIZE), bg => (0, 0, 255));
+ok all-row-rgb($blue,  0, SIZE, 0,   0,   255), 'top row blue with @bg=(0,0,255)';
+
+my $green = letterbox-to-buffer(FIXTURE.IO, :size(SIZE), bg => (0, 255, 0));
+ok all-row-rgb($green, 0, SIZE, 0,   255, 0  ), 'top row green with @bg=(0,255,0)';
+
+# 10: stride math sanity check --------------------------------------------
+
+# Pixel (10, 0) → byte offset 30. Pixel (10, 1) → byte offset 30 + SIZE*3.
+ok $small[30 + SIZE*3 + 2].defined,
+    "row stride {SIZE*3} bytes addressable in a {SIZE*SIZE*3}-byte buffer";
+
+# 11: missing file fails cleanly ------------------------------------------
+
+my $r = letterbox-to-buffer('/nonexistent/path.png'.IO, :size(SIZE));
+nok $r.so, 'letterbox of missing file fails';
+
+# 12: default :size is 448 -------------------------------------------------
+
+my $default-size = letterbox-to-buffer(FIXTURE.IO);
+is $default-size.bytes, 448 * 448 * 3, 'default size yields 448×448×3 = 602112 bytes';
+
+# 13: aspect ratio preserved (image dimensions in larger canvas) ----------
+# At size=128, scale=128/512=0.25 → 128×96 image, top pad y=16, bottom pad y=112.
+# Verify a row near the vertical midpoint contains image data, while the
+# top + bottom margins are pure white.
+ok all-white-row($bigger, 0, LARGER) && all-white-row($bigger, LARGER-1, LARGER)
+   && !all-white-row($bigger, LARGER div 2, LARGER),
+   'aspect ratio preserved: top + bottom rows white, middle has content';
