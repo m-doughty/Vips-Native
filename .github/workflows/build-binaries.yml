@@ -768,31 +768,41 @@ jobs:
           # shim those bindings die at runtime with "requires the
           # libvips_shim".
           #
-          # build-win64-mxe ships GNU-format .dll.a import libs in
-          # $EXTRACT_DIR/lib — both arches use the same format. With
-          # path-type=inherit, $EXTRACT_DIR (set in GITHUB_ENV by
-          # the prior bash step) carries through to the msys2 shell.
-          # At runtime the shim's DLL imports point at libvips-42.dll
-          # and libglib-2.0-0.dll, which FFI.rakumod makes loadable
-          # via PATH + SetDllDirectoryW pointing at the staged lib
-          # dir.
+          # We link directly against the runtime DLLs in
+          # $EXTRACT_DIR/bin via `-l:filename.dll`, instead of using
+          # the conventional `-L lib -lvips`. Reason: build-win64-mxe
+          # ships only MSVC-format `.lib` import libs in `lib/` (no
+          # `.dll.a`). UCRT64's MinGW `ld` (binutils 2.36+) finds
+          # `.lib` by `-l<name>` search; CLANGARM64's `lld` in GNU
+          # mode doesn't, so r9 arm64 died with "lld: error: unable
+          # to find library -lvips". `-l:filename` bypasses the
+          # search algorithm and links against the named file
+          # directly — clang/lld and GNU ld both accept it, and
+          # both auto-derive imports from the DLL's export
+          # directory. Same end result as linking against an import
+          # lib, no upstream-shape or linker-version dependency.
           #
           # Use `cc` instead of `gcc`: UCRT64 ships gcc as primary
           # but CLANGARM64 ships clang (no gcc). Both environments
           # symlink `cc` to the default compiler, so a single
           # invocation covers both arches without conditional logic.
+
+          echo "--- $EXTRACT_DIR/bin (runtime DLLs) ---"
+          ls "$EXTRACT_DIR/bin" | head -30
+          echo "--- $EXTRACT_DIR/lib (if present) ---"
+          ls "$EXTRACT_DIR/lib" 2>/dev/null | head -30 || echo "(no lib dir — expected for arm64 builds)"
+
           cc -O2 -shared \
               -o bundle/libvips_shim.dll \
               src/vips_native_shim.c \
-              -L"$EXTRACT_DIR/lib" \
-              -lvips -lglib-2.0
+              -L"$EXTRACT_DIR/bin" \
+              -l:libvips-42.dll \
+              -l:libglib-2.0-0.dll
 
           # Verify our exports are in the DLL — guards against silent
-          # link failure (linking with GNU .dll.a import libs has
-          # historically tolerated some kinds of unresolved-reference
-          # errors). nm is in both UCRT64 (binutils) and CLANGARM64
-          # (llvm-binutils-aliased); behaves identically for our
-          # purposes.
+          # link failure. nm is in both UCRT64 (binutils) and
+          # CLANGARM64 (llvm-binutils-aliased); behaves identically
+          # for our purposes.
           echo "--- libvips_shim.dll exports ---"
           nm -g --defined-only bundle/libvips_shim.dll \
               | grep -E 'T (_)?vips_shim_' || {
