@@ -2,6 +2,26 @@ Revision history for Vips::Native
 
 {{$NEXT}}
 
+0.4.0  2026-04-29T18:43:31+01:00
+    - Added `letterbox-to-buffer($path, :$size = 448, :@bg = (255, 255, 255))`,
+      a high-level helper that resizes an image to fit inside a square
+      of the given size, pads the gap with the chosen background colour,
+      composites alpha onto that background, and returns the raw 8-bit
+      RGB pixel bytes (Buf[uint8] of size × size × 3). The preprocess
+      pipeline ML image classifiers want — fixed input dimensions,
+      deterministic gap fill, NHWC byte order, no GC entanglement with
+      libvips's heap. Built on three new FFI bindings: `vips_flatten`,
+      `vips_embed`, and `vips_image_write_to_memory` (plus a
+      `vips_shim_free` wrapper around `g_free` for the memory the latter
+      returns).
+
+    - The `vips_flatten` and `vips_embed` bindings are shim-only — both
+      take `VipsArrayDouble *` for the background colour, which is
+      awkward to construct via direct NativeCall. They die with a clear
+      "reinstall with a C toolchain" message if the libvips_shim isn't
+      present, rather than silently corrupting memory. `vips_image_write_to_memory`
+      is non-variadic and binds directly.
+
 0.3.0  2026-04-16T02:48:04+01:00
     - Root-caused the macOS image-load failures to a C varargs
       ABI bug that had been latent across all platforms. libvips's

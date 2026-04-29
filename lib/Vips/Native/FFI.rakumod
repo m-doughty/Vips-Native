@@ -323,6 +323,14 @@ constant VIPS_KERNEL_MKS2021    is export = 7;
 constant VIPS_FALSE is export = 0;
 constant VIPS_TRUE  is export = 1;
 
+# VipsExtend — fill mode for vips_embed
+constant VIPS_EXTEND_BLACK      is export = 0;
+constant VIPS_EXTEND_COPY       is export = 1;
+constant VIPS_EXTEND_REPEAT     is export = 2;
+constant VIPS_EXTEND_MIRROR     is export = 3;
+constant VIPS_EXTEND_WHITE      is export = 4;
+constant VIPS_EXTEND_BACKGROUND is export = 5;
+
 # vips_init
 sub vips_init(Str --> int32) is native($vips-lib) is export { * }
 
@@ -397,6 +405,82 @@ sub vips_pngsave(VipsImage $in, Str $filename, Str $null --> int32) is export {
     $USE-SHIM ?? _vips-pngsave-shim($in, $filename)
               !! _vips-pngsave-direct($in, $filename, $null);
 }
+
+# --- vips_flatten(VipsImage*, VipsImage**, ...) ---
+# Alpha-composite over a (R, G, B) background. The variadic option
+# list takes a VipsArrayDouble * for `background`, which is awkward
+# to construct from Raku, so this binding is shim-only — the direct
+# variadic path would need separate bindings for vips_array_double_new
+# / vips_area_unref. If the shim isn't compiled (no toolchain on
+# install), vips_flatten dies with a clear message rather than
+# silently corrupting memory.
+sub _vips-flatten-shim(
+    VipsImage, CArray[VipsImage], num64, num64, num64 --> int32)
+    is native($shim-lib // '')
+    is symbol('vips_shim_flatten') { * };
+sub vips_flatten(
+    VipsImage $in, CArray[VipsImage] $out,
+    num64 $r = 255e0, num64 $g = 255e0, num64 $b = 255e0 --> int32
+) is export {
+    die "vips_flatten requires the libvips_shim. Reinstall Vips::Native "
+        ~ "with a working C toolchain (xcode-select --install on macOS, "
+        ~ "apt install build-essential on Debian)."
+        unless $USE-SHIM;
+    _vips-flatten-shim($in, $out, $r, $g, $b);
+}
+
+# --- vips_embed(VipsImage*, VipsImage**, x, y, w, h, ...) ---
+# Place input at (x, y) inside a w×h canvas, filling around it with
+# either a fixed colour (extend = VIPS_EXTEND_BACKGROUND) or one of
+# the other VipsExtend modes. Same shim-only constraint as flatten.
+sub _vips-embed-shim(
+    VipsImage, CArray[VipsImage],
+    int32, int32, int32, int32, int32,
+    num64, num64, num64 --> int32)
+    is native($shim-lib // '')
+    is symbol('vips_shim_embed') { * };
+sub vips_embed(
+    VipsImage $in, CArray[VipsImage] $out,
+    int32 $x, int32 $y, int32 $width, int32 $height,
+    int32 $extend = VIPS_EXTEND_BACKGROUND,
+    num64 $r = 255e0, num64 $g = 255e0, num64 $b = 255e0 --> int32
+) is export {
+    die "vips_embed requires the libvips_shim. Reinstall Vips::Native "
+        ~ "with a working C toolchain."
+        unless $USE-SHIM;
+    _vips-embed-shim($in, $out, $x, $y, $width, $height, $extend, $r, $g, $b);
+}
+
+# --- vips_image_write_to_memory(VipsImage *, size_t *) → void * ---
+# Non-variadic, so we bind it directly without going through the shim.
+# Returns a g_malloc'd buffer of width*height*bands bytes (UCHAR
+# format) or NULL on error. Pair with vips_shim_free to release.
+sub vips_image_write_to_memory(
+    VipsImage, CArray[uint64] --> Pointer[uint8])
+    is native($vips-lib) is export { * }
+
+# Free a buffer returned by vips_image_write_to_memory. NULL-safe.
+sub vips_shim_free(Pointer)
+    is native($shim-lib // '')
+    is symbol('vips_shim_free') is export { * };
+
+# Image format / band introspection — needed to validate that a
+# write_to_memory result has the expected layout.
+sub vips_image_get_bands(VipsImage --> int32)
+    is native($vips-lib) is export { * }
+sub vips_image_get_format(VipsImage --> int32)
+    is native($vips-lib) is export { * }
+
+# VipsBandFormat — the elements vips_image_get_format returns
+constant VIPS_FORMAT_NOTSET is export = -1;
+constant VIPS_FORMAT_UCHAR  is export = 0;
+constant VIPS_FORMAT_CHAR   is export = 1;
+constant VIPS_FORMAT_USHORT is export = 2;
+constant VIPS_FORMAT_SHORT  is export = 3;
+constant VIPS_FORMAT_UINT   is export = 4;
+constant VIPS_FORMAT_INT    is export = 5;
+constant VIPS_FORMAT_FLOAT  is export = 6;
+constant VIPS_FORMAT_DOUBLE is export = 9;
 
 # Memory cleanup for images (from GLib/GObject)
 sub g_object_unref(VipsImage) is native($gobject-lib) is export { * }

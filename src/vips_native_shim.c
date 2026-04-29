@@ -42,6 +42,8 @@
  * LC_LOAD_DYLIB. */
 
 typedef struct _VipsImage VipsImage;
+typedef struct _VipsArea VipsArea;
+typedef struct _VipsArrayDouble VipsArrayDouble;
 
 extern VipsImage *vips_image_new_from_file(const char *filename, ...);
 extern int vips_image_get_width(VipsImage *image);
@@ -51,6 +53,17 @@ extern int vips_smartcrop(VipsImage *in, VipsImage **out,
 extern int vips_resize(VipsImage *in, VipsImage **out,
                        double scale, ...);
 extern int vips_pngsave(VipsImage *in, const char *filename, ...);
+extern int vips_flatten(VipsImage *in, VipsImage **out, ...);
+extern int vips_embed(VipsImage *in, VipsImage **out,
+                      int x, int y, int width, int height, ...);
+
+extern VipsArrayDouble *vips_array_double_new(const double *array, int n);
+extern void vips_area_unref(VipsArea *area);
+
+/* GLib heap free — pairs with g_malloc, which vips_image_write_to_memory
+ * uses for the buffer it returns. We expose a tiny shim so callers
+ * don't need to bind libglib themselves. */
+extern void g_free(void *mem);
 
 /* --- wrappers ---------------------------------------------------- */
 
@@ -79,4 +92,51 @@ int
 vips_shim_pngsave(VipsImage *in, const char *filename)
 {
     return vips_pngsave(in, filename, NULL);
+}
+
+/* Alpha-composite over a constant background colour. Caller passes
+ * R, G, B, A as four doubles; libvips wraps them in a heap-allocated
+ * VipsArrayDouble that we ref-down once we're done with the call. */
+int
+vips_shim_flatten(VipsImage *in, VipsImage **out,
+                  double r, double g, double b)
+{
+    double bg[3] = {r, g, b};
+    VipsArrayDouble *vbg = vips_array_double_new(bg, 3);
+    int rc = vips_flatten(in, out, "background", vbg, NULL);
+    vips_area_unref((VipsArea *)vbg);
+    return rc;
+}
+
+/* Place `in` at (x,y) inside a (width, height) canvas, filling the
+ * surrounding pixels with the constant (r,g,b) background. The
+ * `extend` argument is a VipsExtend enum value; the caller is
+ * expected to pass VIPS_EXTEND_BACKGROUND (5) here for the colour
+ * fill to take effect. */
+int
+vips_shim_embed(VipsImage *in, VipsImage **out,
+                int x, int y, int width, int height,
+                int extend,
+                double r, double g, double b)
+{
+    double bg[3] = {r, g, b};
+    VipsArrayDouble *vbg = vips_array_double_new(bg, 3);
+    int rc = vips_embed(in, out, x, y, width, height,
+                        "extend", extend,
+                        "background", vbg,
+                        NULL);
+    vips_area_unref((VipsArea *)vbg);
+    return rc;
+}
+
+/* g_free wrapper. vips_image_write_to_memory returns a g_malloc'd
+ * buffer; the caller releases it by calling back here. The NULL guard
+ * matches GLib's own contract (g_free(NULL) is documented as a no-op,
+ * but we belt-and-brace it). */
+void
+vips_shim_free(void *ptr)
+{
+    if (ptr) {
+        g_free(ptr);
+    }
 }

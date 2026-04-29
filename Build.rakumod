@@ -347,10 +347,25 @@ class Build {
         my Str $os = $*KERNEL.name.lc;
         my Str $ext = $os ~~ /darwin/ ?? 'dylib' !! 'so';
         my IO::Path $shim = $stage.add("libvips_shim.$ext");
-        return if $shim.e;  # already shipped in the prebuilt bundle
 
         my Str $src = "$dist-path/src/vips_native_shim.c";
         return unless $src.IO.e;
+
+        # Skip rebuild only if the staged shim is at least as new as
+        # our source. This avoids stale shims when the prebuilt bundle
+        # ships an older shim than the source tree (e.g. you've added
+        # new shim functions locally — the prebuilt extract restores
+        # the older binary, and without this check try-compile-shim
+        # would silently leave it in place and bindings would die at
+        # NativeCall time with "Cannot locate symbol …").
+        if $shim.e {
+            my $src-mtime  = $src.IO.modified // 0;
+            my $shim-mtime = $shim.modified  // 0;
+            if $shim-mtime >= $src-mtime {
+                return;
+            }
+            say "🔁 Source newer than staged shim — recompiling.";
+        }
 
         # Ensure the stage dir exists — for system-libvips paths
         # nothing else creates it.
