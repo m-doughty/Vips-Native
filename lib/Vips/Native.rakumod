@@ -104,10 +104,8 @@ sub smart-resize(
     GC-vs-libvips ownership trap.
 
     Platforms: macOS arm64, Linux x86_64 + aarch64 (glibc), and
-    Windows x86_64 are supported. Windows arm64 doesn't run Raku
-    yet; the prebuilt for that platform omits the shim, so
-    C<letterbox-to-buffer> dies with a "requires libvips_shim"
-    message there until Raku ships an arm64 Windows build.
+    Windows x86_64 + arm64 are supported. The shim ships in every
+    prebuilt bundle.
     )
 sub letterbox-to-buffer(
     IO::Path() $path,

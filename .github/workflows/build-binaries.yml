@@ -615,12 +615,22 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: windows-x86_64
+          - os: windows-2022
+            platform: windows-x86_64
             mxe-arch: x64
-          - platform: windows-arm64
+            msystem: UCRT64
+            pkg-prefix: ucrt-x86_64
+          - os: windows-11-arm
+            platform: windows-arm64
             mxe-arch: arm64
-    runs-on: windows-2022
-    timeout-minutes: 20
+            msystem: CLANGARM64
+            pkg-prefix: clang-aarch64
+    runs-on: ${{ matrix.os }}
+    # ARM Windows runners can be flaky (cf. Notcurses-Native's
+    # build-binaries.yml comments — ldd subprocesses occasionally
+    # hang under xtajit64 emulation). Cap the job so a stuck runner
+    # fails in an hour rather than burning the GitHub default 6h.
+    timeout-minutes: 60
     defaults:
       run:
         shell: bash
@@ -731,14 +741,11 @@ jobs:
       # MinGW-w64 isn't pre-installed on windows-2022 anymore (it
       # used to ship at C:\msys64\, then got pruned to keep image
       # size down). Use msys2/setup-msys2 with cache to bring it
-      # back — same pattern as Notcurses-Native's CLANGARM64 / UCRT64
-      # job. Only runs on x86_64; the arm64 cross-toolchain isn't
-      # in MSYS2's UCRT64 environment, and arm64 Windows Raku doesn't
-      # exist yet so nothing exercises the variadic ABI bug there.
+      # back — same pattern as Notcurses-Native's job. UCRT64 for
+      # x86_64, CLANGARM64 for arm64 (matches Notcurses).
       - uses: msys2/setup-msys2@v2
-        if: matrix.platform == 'windows-x86_64'
         with:
-          msystem: UCRT64
+          msystem: ${{ matrix.msystem }}
           path-type: inherit
           # No `update: true` — that runs pacman -Syuu, shifts
           # installed versions on every run, and busts the cache
@@ -748,10 +755,9 @@ jobs:
           update: false
           cache: true
           install: >-
-            mingw-w64-ucrt-x86_64-toolchain
+            mingw-w64-${{ matrix.pkg-prefix }}-toolchain
 
-      - name: Compile varargs shim (x86_64 only)
-        if: matrix.platform == 'windows-x86_64'
+      - name: Compile varargs shim
         shell: 'msys2 {0}'
         run: |
           set -euxo pipefail
@@ -763,23 +769,30 @@ jobs:
           # libvips_shim".
           #
           # build-win64-mxe ships GNU-format .dll.a import libs in
-          # $EXTRACT_DIR/lib — perfect for MinGW gcc, useless for
-          # cl.exe. With path-type=inherit, $EXTRACT_DIR (set in
-          # GITHUB_ENV by the prior bash step) carries through to
-          # the msys2 shell. At runtime the shim's DLL imports
-          # point at libvips-42.dll and libglib-2.0-0.dll, which
-          # FFI.rakumod makes loadable via PATH + SetDllDirectoryW
-          # pointing at the staged lib dir.
-          gcc -O2 -shared \
+          # $EXTRACT_DIR/lib — both arches use the same format. With
+          # path-type=inherit, $EXTRACT_DIR (set in GITHUB_ENV by
+          # the prior bash step) carries through to the msys2 shell.
+          # At runtime the shim's DLL imports point at libvips-42.dll
+          # and libglib-2.0-0.dll, which FFI.rakumod makes loadable
+          # via PATH + SetDllDirectoryW pointing at the staged lib
+          # dir.
+          #
+          # Use `cc` instead of `gcc`: UCRT64 ships gcc as primary
+          # but CLANGARM64 ships clang (no gcc). Both environments
+          # symlink `cc` to the default compiler, so a single
+          # invocation covers both arches without conditional logic.
+          cc -O2 -shared \
               -o bundle/libvips_shim.dll \
               src/vips_native_shim.c \
               -L"$EXTRACT_DIR/lib" \
               -lvips -lglib-2.0
 
           # Verify our exports are in the DLL — guards against silent
-          # link failure (gcc -shared with .dll.a import libs has
+          # link failure (linking with GNU .dll.a import libs has
           # historically tolerated some kinds of unresolved-reference
-          # errors).
+          # errors). nm is in both UCRT64 (binutils) and CLANGARM64
+          # (llvm-binutils-aliased); behaves identically for our
+          # purposes.
           echo "--- libvips_shim.dll exports ---"
           nm -g --defined-only bundle/libvips_shim.dll \
               | grep -E 'T (_)?vips_shim_' || {
