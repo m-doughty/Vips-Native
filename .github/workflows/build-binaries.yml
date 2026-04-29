@@ -728,9 +728,31 @@ jobs:
               exit 1
           fi
 
+      # MinGW-w64 isn't pre-installed on windows-2022 anymore (it
+      # used to ship at C:\msys64\, then got pruned to keep image
+      # size down). Use msys2/setup-msys2 with cache to bring it
+      # back — same pattern as Notcurses-Native's CLANGARM64 / UCRT64
+      # job. Only runs on x86_64; the arm64 cross-toolchain isn't
+      # in MSYS2's UCRT64 environment, and arm64 Windows Raku doesn't
+      # exist yet so nothing exercises the variadic ABI bug there.
+      - uses: msys2/setup-msys2@v2
+        if: matrix.platform == 'windows-x86_64'
+        with:
+          msystem: UCRT64
+          path-type: inherit
+          # No `update: true` — that runs pacman -Syuu, shifts
+          # installed versions on every run, and busts the cache
+          # (which keys on installed package state). See
+          # Notcurses-Native's build-binaries.yml for the full
+          # rationale; same cache-friendliness story applies here.
+          update: false
+          cache: true
+          install: >-
+            mingw-w64-ucrt-x86_64-toolchain
+
       - name: Compile varargs shim (x86_64 only)
         if: matrix.platform == 'windows-x86_64'
-        shell: bash
+        shell: 'msys2 {0}'
         run: |
           set -euxo pipefail
           # The Windows shim is required for `letterbox-to-buffer`
@@ -742,47 +764,28 @@ jobs:
           #
           # build-win64-mxe ships GNU-format .dll.a import libs in
           # $EXTRACT_DIR/lib — perfect for MinGW gcc, useless for
-          # cl.exe. windows-2022 runners pre-install MinGW-w64 at
-          # C:\msys64\mingw64\bin, so we invoke gcc directly via the
-          # absolute path (avoids fiddling with the msys2 shell or
-          # PATH). At runtime the shim's DLL imports point at
-          # libvips-42.dll and libglib-2.0-0.dll, which FFI.rakumod
-          # makes loadable via PATH + SetDllDirectoryW pointing at
-          # the staged lib dir.
-          GCC='/c/msys64/mingw64/bin/gcc.exe'
-          if [[ ! -x "$GCC" ]]; then
-            echo "❌ MinGW-w64 gcc not found at $GCC."
-            echo "   windows-2022 runner image may have changed — see"
-            echo "   https://github.com/actions/runner-images for current toolchain."
-            ls /c/msys64/mingw64/bin/ 2>&1 | head -20 || true
-            exit 1
-          fi
-
-          "$GCC" -O2 -shared \
+          # cl.exe. With path-type=inherit, $EXTRACT_DIR (set in
+          # GITHUB_ENV by the prior bash step) carries through to
+          # the msys2 shell. At runtime the shim's DLL imports
+          # point at libvips-42.dll and libglib-2.0-0.dll, which
+          # FFI.rakumod makes loadable via PATH + SetDllDirectoryW
+          # pointing at the staged lib dir.
+          gcc -O2 -shared \
               -o bundle/libvips_shim.dll \
               src/vips_native_shim.c \
               -L"$EXTRACT_DIR/lib" \
               -lvips -lglib-2.0
 
-          # Verify our exports are actually in the DLL — guards
-          # against silent link failure with the import libs.
-          NM='/c/msys64/mingw64/bin/nm.exe'
-          if [[ -x "$NM" ]]; then
-            echo "--- libvips_shim.dll exports ---"
-            "$NM" -g --defined-only bundle/libvips_shim.dll \
-                | grep -E 'T (_)?vips_shim_' || {
-                  echo "❌ no vips_shim_* exports — link likely silent-failed."
-                  exit 1
-                }
-          fi
-
-      # arm64 Windows: the shim isn't built. arm64 Windows Raku
-      # doesn't exist yet, so nothing actually exercises the
-      # NativeCall variadic ABI bug there. Cross-compiling from a
-      # windows-2022 (x86_64) runner needs an aarch64 MinGW-w64
-      # cross compiler that isn't pre-installed on the image — add
-      # when either arm64 Windows Raku ships or we have a runner
-      # available with the cross toolchain.
+          # Verify our exports are in the DLL — guards against silent
+          # link failure (gcc -shared with .dll.a import libs has
+          # historically tolerated some kinds of unresolved-reference
+          # errors).
+          echo "--- libvips_shim.dll exports ---"
+          nm -g --defined-only bundle/libvips_shim.dll \
+              | grep -E 'T (_)?vips_shim_' || {
+                echo "❌ no vips_shim_* exports — link likely silent-failed."
+                exit 1
+              }
 
       - name: Package archive
         run: |
