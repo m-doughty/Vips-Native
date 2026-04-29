@@ -29,8 +29,8 @@
 #   Linux x86_64 / arm64  conda-forge libvips package
 #   Windows x86_64        libvips/build-win64-mxe GitHub release
 
-6e66190864839fa78eb9903bfdd17691a5b2abf6eeb5d24a49aa1d796372e3d2  vips-linux-aarch64-glibc.tar.gz
-fecb7b596df3667ba5788b98056435769e289abc9d042da6bf95df746bf68e42  vips-linux-x86_64-glibc.tar.gz
-000460f5780a1d5abbddd117623ae1712a3beeaea55b527acd03febfcc0f0b13  vips-macos-arm64.tar.gz
-3b6b0d373d190bc37c11d3ae6256abc045f882909534bf2af39060d23dfd17ee  vips-windows-arm64.zip
-21d7d05366e3c46fd8f8e5f31b6b5f832a16454f9f8aef8ac9479929eae1e1c2  vips-windows-x86_64.zip
+3a21387d230e6d45ecccb0008703514f2f97f821fd8b9020dbcc2a01e0686af5  vips-linux-aarch64-glibc.tar.gz
+c44a4f9ceb69291c002b8fbf28cb1842bdc0e32f69abb70bd3a9c48cc713a514  vips-linux-x86_64-glibc.tar.gz
+af4690b809c54fd19eff48500131d54c3d5c8932a44d8b5a943938a539f12e1c  vips-macos-arm64.tar.gz
+402371cfc962f3c9d2d01d760b34e4572e97fb93abcdc1b03cf5577a829af0d1  vips-windows-arm64.zip
+3b341ab0a748a74a7fbdd66ed5f90d6cfd07765397ae67c92804c5fa1c728bae  vips-windows-x86_64.zip

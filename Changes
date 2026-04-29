@@ -2,6 +2,9 @@ Revision history for Vips::Native
 
 {{$NEXT}}
 
+0.4.1  2026-04-29T19:09:29+01:00
+    - Release binaries.
+
 0.4.0  2026-04-29T18:43:31+01:00
     - Added `letterbox-to-buffer($path, :$size = 448, :@bg = (255, 255, 255))`,
       a high-level helper that resizes an image to fit inside a square
@@ -21,6 +24,26 @@ Revision history for Vips::Native
       "reinstall with a C toolchain" message if the libvips_shim isn't
       present, rather than silently corrupting memory. `vips_image_write_to_memory`
       is non-variadic and binds directly.
+
+    - `Build.rakumod`'s `try-compile-shim` now rebuilds the shim when
+      the source mtime is newer than the staged binary, instead of
+      always skipping when a staged shim exists. Avoids the
+      prebuilt-bundle-shadows-local-changes trap when developing
+      shim additions against an older bundled `libvips_shim.{dylib,so}`.
+
+    - `build-binaries.yml`: link the shim against `libglib-2.0` on both
+      macOS and Linux. `vips_shim_free` wraps `g_free` (a libglib
+      symbol), and the prior link command only mentioned `libvips`,
+      so the macOS arm64 build failed with "_g_free undefined".
+      Glob the versioned filename instead of hardcoding it; on Linux
+      symlink `libglib-2.0.so` → the SONAME-stamped file so `-lglib-2.0`
+      resolves cleanly. Both arches fail loudly if libglib isn't
+      present in the bundle.
+
+    - BINARY_TAG bumped to `binaries-vips-8.18.2-r8`. r7 lacks
+      `vips_shim_flatten`, `vips_shim_embed`, and `vips_shim_free`,
+      so any caller of `letterbox-to-buffer` against an r7 bundle
+      would die at NativeCall time with "Cannot locate symbol …".
 
 0.3.0  2026-04-16T02:48:04+01:00
     - Root-caused the macOS image-load failures to a C varargs

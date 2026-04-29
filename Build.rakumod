@@ -143,6 +143,7 @@ class Build {
             # compile if it doesn't (pre-r6 binary tag, or macOS-
             # only shim on a newly-released platform).
             self!try-compile-shim($dist-path, $stage);
+            self!cleanup-old-stages($stage);
             return True;
         }
 
@@ -154,7 +155,50 @@ class Build {
         note "⚠️  Prebuilt unavailable for $plat ($binary-tag) — "
            ~ "Native.rakumod will fall back to system libvips.";
         self!try-compile-shim($dist-path, $stage);
+        self!cleanup-old-stages($stage);
         True;
+    }
+
+    #|( Remove sibling staged dirs for older BINARY_TAGs. zef has no
+        uninstall hook, and Build.rakumod is the only place we can
+        garbage-collect obsolete staged bundles, so we do it here on
+        every install: any sibling under the staged-libs root that
+        looks like one of our `binaries-vips-*` dirs and isn't the
+        currently-active one gets removed. Without this, an upgrade
+        from r7 → r8 leaves the r7 dir on disk; Raku precomp caches
+        and stale processes can then load r7's libvips alongside
+        r8's, producing the duplicate-Class warnings (and on macOS,
+        occasional ObjC class-registration crashes) we hit during
+        the Vips::Native 0.4.0 upgrade.
+
+        Set VIPS_NATIVE_KEEP_OLD_STAGES=1 to disable — useful if
+        you're intentionally pinning multiple versions side-by-side. )
+    method !cleanup-old-stages(IO::Path $current-stage --> Nil) {
+        return if %*ENV<VIPS_NATIVE_KEEP_OLD_STAGES>;
+
+        # $current-stage layout is …/Vips-Native/<binary-tag>/lib,
+        # so the *tag* dir is one level up and the *root* (where
+        # sibling tag dirs live) is two levels up.
+        my $current-tag-dir = $current-stage.parent;
+        my $root            = $current-tag-dir.parent;
+        return unless $root.d;
+
+        # Sanity-check the path looks like ours before we delete
+        # anything inside it.
+        return unless $root.basename eq 'Vips-Native';
+
+        my Str $current-abs = $current-tag-dir.absolute;
+
+        for $root.dir -> $entry {
+            next unless $entry.d;
+            next unless $entry.basename.starts-with('binaries-vips-');
+            next if $entry.absolute eq $current-abs;
+            say "🧹 Removing orphaned staged dir: { $entry }";
+            try {
+                run 'rm', '-rf', $entry.Str;
+                CATCH { default { note "  (failed to remove: { .message })" } }
+            };
+        }
     }
 
     method !staged-lib-dir(Str $binary-tag --> IO::Path) {

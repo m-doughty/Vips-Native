@@ -298,7 +298,10 @@ sub _resolve-shim-lib(--> Str) {
     Str;
 }
 constant $shim-lib is export = _resolve-shim-lib();
-my Bool $USE-SHIM = $shim-lib.defined && $shim-lib.IO.f;
+# `.f` on a stale path (e.g. cached r7 path, r7 dir since deleted)
+# returns a Failure rather than False. `so try ...` collapses both
+# False and the absent-file Failure into a clean Bool.
+my Bool $USE-SHIM = $shim-lib.defined && (so try $shim-lib.IO.f);
 
 # VipsInteresting
 constant VIPS_INTERESTING_NONE      is export = 0;
