@@ -380,11 +380,24 @@ jobs:
           # variadic signature so NativeCall marshals them
           # correctly. See src/vips_native_shim.c for the full
           # rationale and per-function wrappers.
+          # vips_shim_free wraps g_free (libglib), so the shim has a
+          # cross-library symbol the link must resolve. We bundle
+          # libglib already (sanity-checked in the Build.rakumod
+          # extract step), but its versioned filename varies
+          # (libglib-2.0.0.dylib at the moment, libglib-2.0.<major>.dylib
+          # in general). Glob it instead of hardcoding.
+          GLIB_DYLIB=$(ls bundle/libglib-2.0.*.dylib 2>/dev/null | head -1)
+          if [[ -z "$GLIB_DYLIB" ]]; then
+            echo "❌ no libglib-2.0.*.dylib in bundle/ — can't link shim"
+            ls bundle/
+            exit 1
+          fi
           cc -O2 -dynamiclib -fPIC \
               -install_name '@loader_path/libvips_shim.dylib' \
               -o bundle/libvips_shim.dylib \
               src/vips_native_shim.c \
-              bundle/libvips.42.dylib
+              bundle/libvips.42.dylib \
+              "$GLIB_DYLIB"
 
           # Symlinks for the unversioned name so resolution works
           # whether the caller asks for `libvips.dylib` or the
@@ -549,6 +562,18 @@ jobs:
           # Convenience symlink for the unversioned name.
           ln -sf libvips.so.42 bundle/libvips.so
 
+          # Same for libglib — needed to link the shim's
+          # vips_shim_free wrapper (which calls g_free, a libglib
+          # symbol). The bundled file is libglib-2.0.so.<major>;
+          # symlink the unversioned name so `-lglib-2.0` finds it.
+          GLIB_SO=$(ls bundle/libglib-2.0.so.* 2>/dev/null | head -1)
+          if [[ -z "$GLIB_SO" ]]; then
+            echo "❌ no libglib-2.0.so.* in bundle/ — can't link shim"
+            ls bundle/
+            exit 1
+          fi
+          ln -sf "$(basename "$GLIB_SO")" bundle/libglib-2.0.so
+
           # Compile the varargs shim — same rationale as macOS.
           # Linux aarch64 has the same AAPCS64 variadic ABI
           # divergence as Apple arm64 (named args in registers,
@@ -560,7 +585,7 @@ jobs:
               -Wl,-soname,libvips_shim.so \
               -o bundle/libvips_shim.so \
               src/vips_native_shim.c \
-              -Lbundle -lvips
+              -Lbundle -lvips -lglib-2.0
           patchelf --set-rpath '$ORIGIN' bundle/libvips_shim.so
 
           echo "--- bundle contents ---"
