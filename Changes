@@ -2,6 +2,34 @@ Revision history for Vips::Native
 
 {{$NEXT}}
 
+0.5.0  2026-04-29T19:56:21+01:00
+    - Windows prebuilts now ship `libvips_shim.dll` on both x86_64
+      and arm64. Built via `msys2/setup-msys2@v2` with the
+      appropriate per-arch toolchain (UCRT64 / `mingw-w64-ucrt-x86_64-toolchain`
+      for x86_64; CLANGARM64 / `mingw-w64-clang-aarch64-toolchain` for
+      arm64), linking directly against `$EXTRACT_DIR/bin/libvips-42.dll`
+      and `libglib-2.0-0.dll` via `-l:filename` syntax. The earlier
+      `-L$EXTRACT_DIR/lib -lvips` approach worked on UCRT64 (MinGW
+      `ld` finds `.lib` import libs by `-l<name>` search since
+      binutils 2.36+) but failed on CLANGARM64 (`lld` in GNU mode
+      doesn't search `.lib` files). `-l:filename` bypasses search
+      entirely; clang/lld + GNU ld both auto-derive imports from
+      the DLL's export directory. arm64 runs on the
+      `windows-11-arm` runner (mirrors Notcurses-Native's pattern;
+      avoids cross-compile complexity). `letterbox-to-buffer` now
+      works on every target platform — the previous "requires
+      libvips_shim" failure on Windows is fixed.
+
+    - BINARY_TAG bumped to `binaries-vips-8.18.2-r10`. r9 was
+      published with a broken arm64 Windows shim (compiled against
+      x86_64 toolchain on a `windows-2022` runner before the matrix
+      was extended to use `windows-11-arm` + CLANGARM64). r10 is the
+      first release where every Windows arch actually ships a
+      working shim. macOS / Linux content is functionally unchanged
+      from r8 but the archives are re-built and re-hashed by CI;
+      refresh `resources/checksums.txt` from the r10 release's
+      `checksums.txt` once CI publishes.
+
 0.4.1  2026-04-29T19:09:29+01:00
     - Release binaries.
 
