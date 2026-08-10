@@ -2,6 +2,56 @@ Revision history for Vips::Native
 
 {{$NEXT}}
 
+0.6.0  2026-08-10T20:09:05+01:00
+    - In-memory decode + RGBA pipeline (for rendering encrypted /
+      transient image bytes without spilling plaintext to disk):
+        * src/vips_native_shim.c + FFI: new shims/bindings
+          `vips_image_new_from_buffer` (decode an encoded image from
+          a Blob, not a file path), `vips_colourspace`, `vips_addalpha`,
+          `vips_pngsave_buffer`, plus the `VIPS_INTERPRETATION_sRGB`
+          constant.
+        * lib/Vips/Native.rakumod: `class RawRgba` (width/height + a
+          tightly-packed 4-band RGBA Buf, the layout
+          `ncvisual_from_rgba` consumes); `decode-to-rgba(Blob|IO::Path
+          --> RawRgba)` — aspect + alpha preserving, sRGB-normalised
+          (greyscale / CMYK / 16-bit handled), the display complement
+          of `letterbox-to-buffer`; `smart-resize-buffer(Blob, w, h
+          --> Buf)` — buffer→PNG-buffer analogue of `smart-resize` for
+          generating thumbnails/avatars with no temp files.
+        * Lifetime note: `vips_image_new_from_buffer` references its
+          input lazily; both helpers root the encoded CArray across the
+          decode (down to write_to_memory / pngsave_buffer).
+        * t/05-decode-rgba.rakutest + fixtures alpha-split.png (alpha
+          preservation) and rgb-solid.png (addalpha path).
+    - lib/Vips/Native/FFI.rakumod: convert the `$vips-lib`,
+      `$gobject-lib`, `$shim-lib` library-path bindings from
+      `constant` to state-cached subs (`sub vips-lib { state $r =
+      _resolve-lib(...); $r }`). `constant X = _resolve-lib(...)`
+      ran at compile time and baked the resolved path into the
+      precompiled bytecode — and Rakudo doesn't track
+      `resources/BINARY_TAG` as a precomp dependency. A BINARY_TAG
+      bump (which moves staged libs to a new versioned directory
+      and may GC the previous one) would leave the precomp pointing
+      at the old path, producing "Cannot locate native library"
+      errors on freshly installed packages until the user manually
+      ran `rm -rf ~/.raku/precomp/`. Deferring resolution to first
+      sub-call means each process picks up the current tag,
+      regardless of when the precomp was built. NativeCall accepts
+      a Callable for `is native()` and invokes it lazily on first
+      use of each bound sub. All `is native($X-lib)` callsites
+      updated to `is native(&X-lib)`, including the
+      `is native($shim-lib // '')` defensive-fallback variant
+      (the fallback is no longer needed — the sub call always
+      returns a Str, possibly the type object, and NativeCall
+      surfaces missing-lib errors at call site rather than at
+      binding declaration). The `$USE-SHIM` module-init Bool became
+      a state-cached `USE-SHIM()` sub for the same reason, calling
+      `shim-lib()` rather than reading the old constant.
+    - Same fix applied across all three native libs in this release
+      window (Notcurses::Native, Vips::Native, ONNX::Native), so
+      consumers upgrading any of them past the constant-baking
+      precomp bug get the fix consistently.
+
 0.5.0  2026-04-29T19:56:21+01:00
     - Windows prebuilts now ship `libvips_shim.dll` on both x86_64
       and arm64. Built via `msys2/setup-msys2@v2` with the

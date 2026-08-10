@@ -56,6 +56,11 @@ extern int vips_pngsave(VipsImage *in, const char *filename, ...);
 extern int vips_flatten(VipsImage *in, VipsImage **out, ...);
 extern int vips_embed(VipsImage *in, VipsImage **out,
                       int x, int y, int width, int height, ...);
+extern VipsImage *vips_image_new_from_buffer(const void *buf, size_t len,
+                                             const char *option_string, ...);
+extern int vips_colourspace(VipsImage *in, VipsImage **out, int space, ...);
+extern int vips_addalpha(VipsImage *in, VipsImage **out, ...);
+extern int vips_pngsave_buffer(VipsImage *in, void **buf, size_t *len, ...);
 
 extern VipsArrayDouble *vips_array_double_new(const double *array, int n);
 extern void vips_area_unref(VipsArea *area);
@@ -127,6 +132,42 @@ vips_shim_embed(VipsImage *in, VipsImage **out,
                         NULL);
     vips_area_unref((VipsArea *)vbg);
     return rc;
+}
+
+/* Decode an encoded image (PNG/JPEG/WebP/...) from an in-memory
+ * buffer. libvips does NOT copy `buf` — it references it lazily, so
+ * the caller must keep the buffer alive for the lifetime of the
+ * returned VipsImage. The empty option_string takes loader defaults. */
+VipsImage *
+vips_shim_image_new_from_buffer(const void *buf, size_t len)
+{
+    return vips_image_new_from_buffer(buf, len, "", NULL);
+}
+
+/* Convert to a target colourspace (pass a VipsInterpretation enum
+ * value, e.g. VIPS_INTERPRETATION_sRGB = 22). Normalises greyscale /
+ * CMYK / 16-bit sources to 8-bit sRGB; any alpha band passes through
+ * untouched. */
+int
+vips_shim_colourspace(VipsImage *in, VipsImage **out, int space)
+{
+    return vips_colourspace(in, out, space, NULL);
+}
+
+/* Append an opaque alpha channel if the image doesn't already have
+ * one (no-op semantics are the caller's job — call only when bands < 4). */
+int
+vips_shim_addalpha(VipsImage *in, VipsImage **out)
+{
+    return vips_addalpha(in, out, NULL);
+}
+
+/* Encode `in` to PNG in memory. On success *buf points at a g_malloc'd
+ * byte buffer of *len bytes; release it with vips_shim_free. */
+int
+vips_shim_pngsave_buffer(VipsImage *in, void **buf, size_t *len)
+{
+    return vips_pngsave_buffer(in, buf, len, NULL);
 }
 
 /* g_free wrapper. vips_image_write_to_memory returns a g_malloc'd

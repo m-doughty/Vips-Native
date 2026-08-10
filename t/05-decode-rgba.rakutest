@@ -1,0 +1,99 @@
+use Test;
+use lib 'lib';
+
+use Vips::Native;
+
+# decode-to-rgba's contract:
+#   - Returns a RawRgba: width, height, and a Buf[uint8] of exactly
+#     width×height×4 bytes in R,G,B,A order.
+#   - Aspect ratio and alpha are preserved (unlike letterbox-to-buffer).
+#   - Two forms: from an in-memory Blob of encoded bytes, or from a file
+#     IO::Path. Both must produce identical pixels for the same image.
+#   - Colourspace normalised to 8-bit sRGB; output always 4-band.
+#
+# smart-resize-buffer's contract:
+#   - Decodes an encoded Blob, smartcrops + resizes, returns a PNG Buf.
+#   - No file ever touches disk.
+#
+# Fixtures:
+#   camelia.png      512×385, 4-band but fully opaque (RGBA round-trip)
+#   alpha-split.png  8×8, left half transparent / right half opaque green
+#   rgb-solid.png    6×4, 3-band RGB (no alpha) — exercises the addalpha path
+#
+# Flat assertions (not subtests): CI runs prove6 --verbose with VIPS_INFO=1,
+# and libvips's unindented VIPS-INFO lines break TAP plan-parsing inside a
+# subtest. See t/04-letterbox.rakutest for the same note.
+
+constant CAMELIA = 't/fixtures/camelia.png';
+constant ALPHA   = 't/fixtures/alpha-split.png';
+constant RGB     = 't/fixtures/rgb-solid.png';
+
+plan 24;
+
+sub px($img, Int $x, Int $y) {
+    my $i = ($y * $img.width + $x) * 4;
+    $img.rgba[$i .. $i + 3].List;
+}
+
+# 1-4: Blob decode of camelia -------------------------------------------------
+
+my $cam-bytes = CAMELIA.IO.slurp(:bin);
+my $cam = decode-to-rgba($cam-bytes);
+isa-ok $cam, Vips::Native::RawRgba, 'decode-to-rgba(Blob) returns a RawRgba';
+is $cam.width,  512, 'camelia width preserved (512)';
+is $cam.height, 385, 'camelia height preserved (385)';
+is $cam.rgba.bytes, 512 * 385 * 4, 'rgba buffer is width×height×4 bytes';
+
+# 5-7: IO::Path decode of the same image is byte-identical --------------------
+
+my $cam-file = decode-to-rgba(CAMELIA.IO);
+is $cam-file.width,  512, 'path decode width matches';
+is $cam-file.height, 385, 'path decode height matches';
+ok $cam.rgba eqv $cam-file.rgba,
+    'Blob and IO::Path decode of the same image yield identical pixels';
+
+# 8: real pixels came through (not an all-zero buffer) ------------------------
+
+ok $cam.rgba.List.grep(* > 0).elems > 0, 'decoded buffer contains non-zero pixels';
+
+# 9-13: alpha is PRESERVED, not flattened (alpha-split fixture) ----------------
+
+my $a = decode-to-rgba(ALPHA.IO.slurp(:bin));
+is $a.width,  8, 'alpha-split width (8)';
+is $a.height, 8, 'alpha-split height (8)';
+is-deeply px($a, 0, 0), (255, 0, 0, 0).List,
+    'transparent pixel keeps alpha 0 (not composited to opaque)';
+is-deeply px($a, 3, 4), (255, 0, 0, 0).List, 'transparent region stays transparent';
+is-deeply px($a, 7, 7), (0, 255, 0, 255).List, 'opaque green pixel intact';
+
+# 14-16: 3-band RGB source gets an opaque alpha added -------------------------
+
+my $rgb = decode-to-rgba(RGB.IO.slurp(:bin));
+is $rgb.rgba.bytes, 6 * 4 * 4, '3-band source decodes to 4-band (w×h×4 bytes)';
+is-deeply px($rgb, 0, 0), (0, 0, 255, 255).List, 'RGB pixel gains opaque alpha 255';
+ok (^($rgb.width * $rgb.height)).map({ $rgb.rgba[$_ * 4 + 3] }).all == 255,
+    'every added alpha byte is 255 (fully opaque)';
+
+# 17-19: decode failure modes -------------------------------------------------
+
+nok decode-to-rgba(buf8.new).so, 'empty buffer fails cleanly';
+nok decode-to-rgba(Buf[uint8].new(1, 2, 3, 4, 5)).so, 'garbage bytes fail cleanly';
+nok decode-to-rgba('/nonexistent/path.png'.IO).so, 'missing file fails cleanly';
+
+# 20-22: smart-resize-buffer round-trips through PNG --------------------------
+
+my $thumb = smart-resize-buffer($cam-bytes, 100, 100);
+isa-ok $thumb, Buf, 'smart-resize-buffer returns a Buf';
+is $thumb[0 .. 3].List, (137, 80, 78, 71).List, 'output is a PNG (magic bytes)';
+my $thumb-img = decode-to-rgba($thumb);
+ok $thumb-img.width == 100 && $thumb-img.height == 100,
+    'resized PNG decodes to the requested 100×100';
+
+# 23: a second size, to prove the dimension is honoured ----------------------
+
+my $tiny = decode-to-rgba(smart-resize-buffer($cam-bytes, 64, 64));
+ok $tiny.width == 64 && $tiny.height == 64, 'smart-resize-buffer to 64×64';
+
+# 24: smart-resize-buffer rejects bad input ----------------------------------
+
+nok smart-resize-buffer(buf8.new, 100, 100).so, 'empty input buffer fails cleanly';
