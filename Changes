@@ -2,6 +2,58 @@ Revision history for Vips::Native
 
 {{$NEXT}}
 
+0.6.2  2026-08-11T15:29:11+01:00
+    - Fix the system-libvips fallback, a regression introduced in
+      0.6.0. That release refactored the resolvers from
+      `constant $vips-lib = _resolve-lib(...)` + `is native($vips-lib)`
+      to state-cached subs + `is native(&vips-lib)` (correctly — it
+      stops a resolved path being baked into precompiled bytecode
+      across a BINARY_TAG bump), but NativeCall only name-mangles the
+      *string* form of the trait. A Callable's return value goes to
+      dlopen() verbatim, so the old "return the bare short name and
+      let the OS loader decorate it" fallback became dlopen("vips")
+      and every system-libvips install failed with "Cannot locate
+      native library 'vips'". The sub/Callable structure stays; the
+      fallback now returns an absolute path (or, at worst, a
+      fully-formed "libvips.<ext>" filename) and never a short name.
+    - New system probe behind that fallback, in order: the dynamic
+      loader's own search env vars (DYLD_LIBRARY_PATH +
+      DYLD_FALLBACK_LIBRARY_PATH / LD_LIBRARY_PATH / PATH), then the
+      platform's library dirs, then `ldconfig -p`'s cache listing on
+      Linux. On macOS that includes per-formula Homebrew opt kegs
+      (<prefix>/opt/vips/lib, <prefix>/opt/glib/lib) — required,
+      because dyld's default search doesn't include /opt/homebrew/lib
+      at all and an *unlinked* vips keg has nothing in <prefix>/lib.
+      On Linux it includes the Debian multiarch tuple dirs, computed
+      from the machine and cross-checked by globbing.
+    - Library filename matching is now strict: exactly libvips.<ext>,
+      libvips.<ext>.<ver>, libvips.<ver>.<ext> or libvips-<ver>.<ext>.
+      The old lenient rule also matched libvips-cpp.* — the C++
+      binding that ships beside libvips in every distro package and
+      brew keg — which would have been a silent mis-link now that we
+      probe directories full of other people's libraries. The lenient
+      rule is retained only for directories we populate ourselves
+      (the staged bundle / $VIPS_NATIVE_LIB_DIR), and strict matching
+      is tried first there too.
+    - VIPSHOME / GIO_MODULE_DIR are no longer set just because the
+      staged dir exists. In system mode Build.rakumod stages only the
+      varargs shim there, and pointing a *system* libvips at a
+      prefix with no vips-modules-<M>.<m>/ silently disabled every
+      split-out format loader (Homebrew ships the split layout).
+      Both settings now require libvips itself to be staged.
+    - CI: the system-libvips lane sets VIPS_NATIVE_DATA_DIR to the
+      same scratch dir for the install step and the test step, so the
+      compiled shim is actually visible to the tests (mandatory on
+      Apple arm64) while libvips/libgobject still genuinely fall
+      through to the system probe. Also fixed the macOS failure
+      diagnostic, which still referenced the pre-0.6.0 $vips-lib
+      constant and would have failed to compile.
+    - New t/06-lib-resolution.rakutest: 63 offline assertions over the
+      strict matcher (including the libvips-cpp rejections on all
+      three platform spellings), the ldconfig-cache parser (stale
+      entries skipped) and probe ordering. Runs with no libvips
+      present.
+
 0.6.1  2026-08-11T14:46:26+01:00
     - Bump BINARY_TAG to binaries-vips-8.18.2-r11 — first bundle
       that ships the shim .srchash sidecar.

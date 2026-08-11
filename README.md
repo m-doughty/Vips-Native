@@ -45,7 +45,7 @@ INSTALLATION
 
   * **Prebuilt bundle (default)** — fetched from the project's GitHub Releases at install time, sha256-pinned against `resources/checksums.txt`, staged under `$XDG_DATA_HOME/Vips-Native/<binary-tag>/lib/`. Bundles include libvips, libglib, libgio, libgobject, the format loaders (jpeg/png/webp/tiff/heif/avif/jxl/openslide/poppler/magick) and all their transitive deps with `@loader_path` (macOS) / `$ORIGIN` (Linux) / sibling-DLL (Windows) relocations baked in, so the bundle is self-contained.
 
-  * **System libvips** — fallback when the prebuilt download fails or no prebuilt exists for your platform. The OS dynamic loader resolves `is native('vips')` against your installed libvips.
+  * **System libvips** — fallback when the prebuilt download fails or no prebuilt exists for your platform. `Vips::Native` probes for an installed libvips itself and loads it by absolute path: first the dynamic loader's own search variables (`DYLD_LIBRARY_PATH` and `DYLD_FALLBACK_LIBRARY_PATH` on macOS, `LD_LIBRARY_PATH` on Linux, `PATH` on Windows), then the platform's library directories — including Homebrew's per-formula opt kegs, so an **unlinked** `brew install vips` is still found — and finally `ldconfig -p`'s cache listing on Linux.
 
   * On macOS: `brew install vips`
 

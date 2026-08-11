@@ -1,0 +1,264 @@
+use Test;
+use lib 'lib';
+
+# Offline tests for the native-library *resolver* — the pure parts of
+# Vips::Native::FFI's lib lookup. Deliberately touches no libvips
+# symbol, so this file passes on a machine with no libvips at all
+# (and, more usefully, catches resolution regressions before they
+# turn into "Cannot locate native library" a hundred lines later).
+#
+# The internals under test are `my sub`s tagged `is export(:INTERNAL)`
+# — importing only that tag keeps them out of the module's public
+# surface while still letting the suite reach them without EVAL or
+# symbol-table spelunking.
+use Vips::Native::FFI :INTERNAL;
+
+# --- fixture scaffolding ----------------------------------------------
+
+sub nuke(IO::Path $p) {
+    if $p.d {
+        nuke($_) for $p.dir;
+        $p.rmdir;
+    }
+    elsif $p.e || $p.l {
+        $p.unlink;
+    }
+}
+
+my IO::Path $root =
+    $*TMPDIR.add("vips-native-resolution-{$*PID}-{now.Int}");
+$root.mkdir;
+END { nuke($root) if $root.d }
+
+sub fixture-dir(Str $name, *@files --> IO::Path) {
+    my IO::Path $dir = $root.add($name);
+    $dir.mkdir;
+    $dir.add($_).spurt('') for @files;
+    $dir;
+}
+
+# Every shape a real install throws at us, plus the near-misses that
+# must NOT be picked. libvips-cpp is the dangerous one: the C++
+# binding sits beside libvips in every distro package and every brew
+# keg, and it re-exports the C entry points, so mis-linking to it
+# fails *silently* rather than with a missing-symbol error.
+my IO::Path $all = fixture-dir('all',
+    'libvips.so', 'libvips.so.42',
+    'libvips-cpp.so', 'libvips-cpp.so.42',
+    'libvips.42.dylib', 'libvips-cpp.dylib',
+    'libgobject-2.0.so.0', 'libgobject-2.0.0.dylib',
+    'libvips-42.dll',
+    'libvips.txt', 'libvipsfoo.so',
+);
+
+my IO::Path $cpp-only = fixture-dir('cpp-only',
+    'libvips-cpp.so', 'libvips-cpp.so.42',
+    'libvips-cpp.dylib', 'libvips-cpp.42.dylib',
+    'libvips-cpp-42.dll',
+);
+
+my IO::Path $both = fixture-dir('both', 'libvips.dylib', 'libvips.42.dylib');
+
+# --- _lib-name-match: the strict matcher ------------------------------
+
+my @accept =
+    ('libvips.so',            'libvips',        'so'),
+    ('libvips.so.42',         'libvips',        'so'),
+    ('libvips.so.42.17.1',    'libvips',        'so'),
+    ('libvips.dylib',         'libvips',        'dylib'),
+    ('libvips.42.dylib',      'libvips',        'dylib'),
+    ('libvips.dll',           'libvips',        'dll'),
+    ('libvips-42.dll',        'libvips',        'dll'),
+    ('libgobject-2.0.so',     'libgobject-2.0', 'so'),
+    ('libgobject-2.0.so.0',   'libgobject-2.0', 'so'),
+    ('libgobject-2.0.0.dylib','libgobject-2.0', 'dylib'),
+    ('libgobject-2.0-0.dll',  'libgobject-2.0', 'dll'),
+    ('libvips_shim.dylib',    'libvips_shim',   'dylib'),
+    ('libvips_shim.so',       'libvips_shim',   'so'),
+;
+
+for @accept -> ($bn, $name, $ext) {
+    ok _lib-name-match($bn, $name, $ext),
+        "accepts $bn as $name (.$ext)";
+}
+
+my @reject =
+    # The catastrophic one, on every platform spelling.
+    ('libvips-cpp.so',        'libvips',        'so'),
+    ('libvips-cpp.so.42',     'libvips',        'so'),
+    ('libvips-cpp.dylib',     'libvips',        'dylib'),
+    ('libvips-cpp.42.dylib',  'libvips',        'dylib'),
+    ('libvips-cpp-42.dll',    'libvips',        'dll'),
+    ('libvips-cpp.dll',       'libvips',        'dll'),
+    # Same-prefix libraries that are simply other libraries.
+    ('libvipsfoo.so',         'libvips',        'so'),
+    ('libvips_shim.dylib',    'libvips',        'dylib'),
+    ('libgobject-2.0-cpp.so', 'libgobject-2.0', 'so'),
+    # Not shared objects at all.
+    ('libvips.txt',           'libvips',        'so'),
+    ('libvips.a',             'libvips',        'so'),
+    ('libvips.la',            'libvips',        'so'),
+    # Sidecars Build.rakumod parks next to the staged shim.
+    ('libvips_shim.dylib.srchash', 'libvips_shim', 'dylib'),
+    ('libvips_shim.so.srchash',    'libvips_shim', 'so'),
+    # Malformed / non-numeric version tails.
+    ('libvips.so.abc',        'libvips',        'so'),
+    ('libvips.so.',           'libvips',        'so'),
+    ('libvips.so.42..1',      'libvips',        'so'),
+    ('libvips.beta.dylib',    'libvips',        'dylib'),
+    ('libvips-beta.dll',      'libvips',        'dll'),
+    # Right file, wrong platform extension.
+    ('libvips.so',            'libvips',        'dylib'),
+    ('libvips.42.dylib',      'libvips',        'so'),
+    ('',                      'libvips',        'so'),
+;
+
+for @reject -> ($bn, $name, $ext) {
+    nok _lib-name-match($bn, $name, $ext),
+        "rejects '$bn' as $name (.$ext)";
+}
+
+# --- _find-strict: directory scan -------------------------------------
+
+is _find-strict($all, 'libvips', 'so').IO.basename, 'libvips.so',
+    'exact unversioned name wins over the versioned sibling';
+is _find-strict($all, 'libvips', 'dylib').IO.basename, 'libvips.42.dylib',
+    'versioned Mach-O name found when the exact one is absent';
+is _find-strict($all, 'libvips', 'dll').IO.basename, 'libvips-42.dll',
+    'versioned Windows DLL found';
+is _find-strict($all, 'libgobject-2.0', 'so').IO.basename,
+    'libgobject-2.0.so.0', 'gobject SONAME found (.so)';
+is _find-strict($all, 'libgobject-2.0', 'dylib').IO.basename,
+    'libgobject-2.0.0.dylib', 'gobject compat version found (.dylib)';
+
+ok _find-strict($all, 'libvips', 'so').IO.is-absolute,
+    '_find-strict returns an absolute path';
+
+# The rejection that matters, pinned at the directory level: a dir
+# containing *only* the C++ binding must resolve to nothing rather
+# than to libvips-cpp.
+for <so dylib dll> -> Str $ext {
+    nok _find-strict($cpp-only, 'libvips', $ext).defined,
+        "libvips-cpp-only dir yields no libvips match (.$ext)";
+}
+
+nok _find-strict($all, 'libglib-2.0', 'so').defined,
+    'absent library yields an undefined Str';
+nok _find-strict($root.add('does-not-exist'), 'libvips', 'so').defined,
+    'missing directory yields an undefined Str';
+
+is _find-strict($both, 'libvips', 'dylib'),
+   _find-strict($both, 'libvips', 'dylib'),
+   'repeated lookups in a multi-match dir agree (deterministic order)';
+is _find-strict($both, 'libvips', 'dylib').IO.basename, 'libvips.dylib',
+    'multi-match dir prefers the exact name';
+
+# --- _ldconfig-pick: the Linux cache-listing parser -------------------
+
+my IO::Path $ld = fixture-dir('ldconfig',
+    'libvips.so.42', 'libgobject-2.0.so.0');
+my Str $real-vips    = $ld.add('libvips.so.42').absolute;
+my Str $real-gobject = $ld.add('libgobject-2.0.so.0').absolute;
+my Str $ghost        = $ld.add('gone/libvips.so.42').absolute;
+
+# Real `ldconfig -p` output: a header line, then tab-indented
+# "<soname> (<abi tags>) => <path>" entries.
+my Str $sample = qq:to/LDCONFIG/;
+    1234 libs found in cache `/etc/ld.so.cache'
+    \tlibvips-cpp.so.42 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libvips-cpp.so.42
+    \tlibvipsfoo.so (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libvipsfoo.so
+    \tlibvips.so.42 (libc6,x86-64) => $ghost
+    \tlibvips.so.42 (libc6,x86-64) => $real-vips
+    \tlibgobject-2.0.so.0 (libc6,x86-64) => $real-gobject
+    a line with no arrow at all
+    LDCONFIG
+
+is _ldconfig-pick($sample, 'libvips', 'so'), $real-vips,
+    'ldconfig parser skips libvips-cpp and the stale cache entry';
+is _ldconfig-pick($sample, 'libgobject-2.0', 'so'), $real-gobject,
+    'ldconfig parser finds libgobject-2.0';
+nok _ldconfig-pick($sample, 'libglib-2.0', 'so').defined,
+    'ldconfig parser returns undefined for an absent library';
+nok _ldconfig-pick("\tlibvips.so.42 (libc6,x86-64) => $ghost", 'libvips', 'so')
+        .defined,
+    'ldconfig entry whose target is gone is skipped, not returned';
+nok _ldconfig-pick('', 'libvips', 'so').defined,
+    'empty ldconfig output yields undefined';
+nok _ldconfig-pick("garbage\nmore garbage\n", 'libvips', 'so').defined,
+    'unparseable ldconfig output yields undefined';
+
+# --- probe order ------------------------------------------------------
+
+# From here on we drive the *live* resolver, so everything has to be
+# expressed in this host's extension.
+my Str $ext = $*KERNEL.name.lc.contains('darwin') ?? 'dylib'
+           !! $*DISTRO.is-win                     ?? 'dll'
+           !!                                        'so';
+
+# The loader search-path variable this platform's dynamic linker
+# actually consults (mirrors _loader-env-dirs).
+my Str $loader-var = $*KERNEL.name.lc.contains('darwin')
+                            ?? 'DYLD_LIBRARY_PATH'
+                  !! $*DISTRO.is-win ?? 'PATH'
+                  !!                    'LD_LIBRARY_PATH';
+my Str $path-sep = $*DISTRO.is-win ?? ';' !! ':';
+
+my IO::Path $envdir   = fixture-dir('envdir',   "libvips.$ext");
+my IO::Path $override = fixture-dir('override', "libvips.$ext");
+my IO::Path $emptydata = fixture-dir('emptydata');
+
+my Str @env-keys =
+    'VIPS_NATIVE_LIB_DIR', 'VIPS_NATIVE_DATA_DIR', $loader-var;
+my %saved;
+for @env-keys -> Str $k {
+    %saved{$k} = %*ENV{$k} if %*ENV{$k}:exists;
+}
+END {
+    for @env-keys -> Str $k {
+        %saved{$k}:exists ?? (%*ENV{$k} = %saved{$k})
+                          !! (%*ENV{$k}:delete);
+    }
+}
+
+# Prepend rather than replace: on Windows this variable is PATH, and
+# blowing it away would break every subprocess the harness spawns.
+my Str $prev-loader = %*ENV{$loader-var} // '';
+%*ENV{$loader-var} = $prev-loader.chars
+    ?? $envdir.absolute ~ $path-sep ~ $prev-loader
+    !! $envdir.absolute;
+
+# Point the staged-bundle lookup at an empty dir so the system probe
+# is genuinely what answers — this is the CI system-lane setup.
+%*ENV<VIPS_NATIVE_DATA_DIR> = $emptydata.absolute;
+%*ENV<VIPS_NATIVE_LIB_DIR>:delete;
+
+is _find-system-lib('libvips'), $envdir.add("libvips.$ext").absolute,
+    'system probe reads the loader search-path env var first';
+is _resolve-lib('libvips'), $envdir.add("libvips.$ext").absolute,
+    'resolver falls through an empty staged dir to the system probe';
+
+%*ENV<VIPS_NATIVE_LIB_DIR> = $override.absolute;
+is _resolve-lib('libvips'), $override.add("libvips.$ext").absolute,
+    'VIPS_NATIVE_LIB_DIR override beats the loader env var';
+%*ENV<VIPS_NATIVE_LIB_DIR>:delete;
+
+# The regression pin. Pre-0.6.0 this fell back to the *string* form
+# `is native('vips')` and NativeCall mangled the short name into a
+# real filename; 0.6.0's move to `is native(&vips-lib)` hands our
+# return value to dlopen verbatim, so a short name became
+# dlopen("vips") — "Cannot locate native library 'vips'". Whatever we
+# return must be an absolute path or a complete filename.
+my Str $miss = _resolve-lib('libvips-native-no-such-library');
+is $miss, "libvips-native-no-such-library.$ext",
+    'total miss yields a complete filename, never a bare short name';
+ok $miss.ends-with(".$ext"),
+    'fallback carries this platform\'s shared-library extension';
+
+for <libvips libgobject-2.0> -> Str $name {
+    my Str $r = _resolve-lib($name);
+    ok $r.contains('.'), "$name resolves to something dlopen-shaped ($r)";
+    isnt $r, $name.subst(/^lib/, ''),
+        "$name never degrades to the bare short name";
+}
+
+done-testing;

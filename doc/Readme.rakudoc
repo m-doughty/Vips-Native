@@ -64,8 +64,14 @@ their transitive deps with C<@loader_path> (macOS) / C<$ORIGIN>
 is self-contained.
 
 =item B<System libvips> — fallback when the prebuilt download fails
-or no prebuilt exists for your platform. The OS dynamic loader
-resolves C<is native('vips')> against your installed libvips.
+or no prebuilt exists for your platform. C<Vips::Native> probes for
+an installed libvips itself and loads it by absolute path: first the
+dynamic loader's own search variables (C<DYLD_LIBRARY_PATH> and
+C<DYLD_FALLBACK_LIBRARY_PATH> on macOS, C<LD_LIBRARY_PATH> on Linux,
+C<PATH> on Windows), then the platform's library directories —
+including Homebrew's per-formula opt kegs, so an B<unlinked>
+C<brew install vips> is still found — and finally C<ldconfig -p>'s
+cache listing on Linux.
 =begin item
 On macOS:    C<brew install vips>
 =end item

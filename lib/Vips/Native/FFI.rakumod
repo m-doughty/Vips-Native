@@ -14,16 +14,58 @@ use NativeCall;
 #      preserved (libvips.42.dylib, libgobject-2.0.0.so, etc.) so
 #      the inter-lib refs vips bakes in via @loader_path / $ORIGIN /
 #      sibling-DLL all resolve correctly.
-#   3. Bare library name — let the OS dynamic loader find it via
-#      LD_LIBRARY_PATH / DYLD_FALLBACK_LIBRARY_PATH / Windows DLL
-#      search order. This is the system-libvips fallback (matches
-#      0.1.x behaviour for systems with libvips installed via
-#      package manager).
+#   3. System probe (`_find-system-lib`) — the system-libvips
+#      fallback, for people who installed libvips from a package
+#      manager. We walk, in order: the dynamic loader's own search
+#      env vars (DYLD_LIBRARY_PATH / DYLD_FALLBACK_LIBRARY_PATH on
+#      macOS, LD_LIBRARY_PATH on Linux, PATH on Windows), then the
+#      platform's standard library dirs (Homebrew prefix *and* its
+#      per-formula opt kegs on macOS, Debian multiarch triple dirs
+#      + /usr/lib{,64} on Linux), then `ldconfig -p`'s cache listing
+#      on Linux. Always yields an ABSOLUTE path.
+#   4. Last resort: the fully-formed relative filename
+#      ("libvips.dylib" / "libvips.so" / "libvips.dll"), which the
+#      loader can still resolve against its own default search
+#      paths, and which names something sensible in the error
+#      message when it can't.
+#
+# !!! Step 3/4 must never degrade to a bare short name ('vips'). !!!
+#
+# Every binding below uses the *Callable* form of the trait —
+# `is native(&vips-lib)` — and NativeCall hands a Callable's return
+# value to dlopen() / LoadLibrary() VERBATIM. No 'lib' prefix, no
+# '.so'/'.dylib' suffix, no version guessing. Verified empirically:
+# a callable returning "zzznope" produces dlopen("zzznope"), whereas
+# the *string* form `is native("zzznope")` produces
+# dlopen("libzzznope.dylib"). Only the string form gets NativeCall's
+# name mangling.
+#
+# That distinction is exactly what 0.6.0 tripped over. Before it,
+# these were `constant $vips-lib is export = _resolve-lib(...)` used
+# as `is native($vips-lib)` — the string form — so the bare 'vips'
+# fallback got mangled into a real filename and the system-libvips
+# lane worked. 0.6.0 (bb4a4d3) moved to state-cached subs +
+# `is native(&vips-lib)` to stop the resolved path being baked into
+# precompiled bytecode (a real bug: see the vips-lib comment for the
+# BINARY_TAG-bump staleness it fixes), and the fallback silently
+# became dlopen("vips") — "Cannot locate native library 'vips'" on
+# every OS. The sub/Callable structure is correct and stays; what
+# changed here is what the fallback *returns*. Keep it an absolute
+# path or a fully-formed filename, forever.
+#
+# Also note, for macOS specifically: dyld's default search does NOT
+# include /opt/homebrew/lib (confirmed in a DYLD_PRINT_LIBRARIES
+# trace), so on Apple silicon even a well-formed "libvips.dylib"
+# can't find a Homebrew vips. The probe *must* produce an absolute
+# path there.
 
 constant $os = $*KERNEL.name.lc;
 constant $ext = $os ~~ /darwin/ ?? 'dylib'
              !! $*DISTRO.is-win ?? 'dll'
              !! 'so';
+
+# Separator for the loader's PATH-shaped env vars.
+constant $env-path-sep = $*DISTRO.is-win ?? ';' !! ':';
 
 sub _staged-lib-dir(--> IO::Path) {
     # %?RESOURCES<BINARY_TAG> can misbehave during zef's dep-
@@ -32,12 +74,18 @@ sub _staged-lib-dir(--> IO::Path) {
     # dict isn't fully populated. Insist on .f (regular file) and
     # try {} the slurp so a bad value falls through cleanly to the
     # system-libvips fallback instead of dying.
+    #
+    # Returns the IO::Path *type object* (not Nil) on failure:
+    # callers pass the result straight into `IO::Path $dir`
+    # parameters, and Nil doesn't type-check against that — a
+    # missing/unreadable BINARY_TAG would have died inside the
+    # binder instead of falling through to the system probe.
     my $res = %?RESOURCES<BINARY_TAG>;
     my Str $tag = '';
     if $res.defined && $res.IO.f {
         $tag = (try $res.IO.slurp.trim) // '';
     }
-    return Nil unless $tag.chars;
+    return IO::Path unless $tag.chars;
     my Str $base = %*ENV<VIPS_NATIVE_DATA_DIR>
         // %*ENV<XDG_DATA_HOME>
         // ($*DISTRO.is-win
@@ -47,33 +95,301 @@ sub _staged-lib-dir(--> IO::Path) {
     "$base/Vips-Native/$tag/lib".IO;
 }
 
-# Find a lib by basename (without ext) in $dir, accepting versioned
-# variants since vips ships per-platform names like libvips.42.dylib,
-# libvips.so.42, libvips-42.dll.
-sub _find-in(IO::Path $dir, Str $name --> Str) {
-    return Str unless $dir.defined && $dir.d;
-    my $exact = $dir.add("$name.$ext");
-    return $exact.Str if $exact.e;
+# Is $s a dot-separated run of digits ("42", "42.17.1")? Used to
+# validate the *version* part of a library filename — the part that
+# distinguishes libvips.so.42 (ours) from libvips-cpp.so (not ours).
+# Empty string and empty components ("42..1") are rejected.
+my sub _digit-run(Str $s --> Bool) {
+    return False unless $s.defined && $s.chars;
+    so $s.split('.').all ~~ /^ \d+ $/;
+}
 
-    for $dir.dir -> $entry {
-        next unless $entry.e;
-        my $bn = $entry.basename;
-        return $entry.Str if $bn.starts-with("$name.") && $bn.contains(".$ext");
-        return $entry.Str if $bn.starts-with("$name-") && $bn.ends-with(".$ext");
+#| Strict "is this file the shared library named $name?" predicate,
+#| for a stem like 'libvips' / 'libgobject-2.0' and an extension
+#| like 'so' / 'dylib' / 'dll'. Accepts exactly four shapes:
+#|
+#|     libvips.so            unversioned / dev symlink
+#|     libvips.so.42         ELF SONAME + version tail
+#|     libvips.42.dylib      Mach-O compatibility version
+#|     libvips-42.dll        Windows versioned DLL
+#|
+#| …and nothing else. The "nothing else" is the whole point. libvips
+#| ships libvips-cpp.<ver> — the C++ binding — in the SAME directory
+#| as libvips in every distro package and Homebrew keg. A lenient
+#| `starts-with("libvips-")` rule matches it, and directory order is
+#| not something we control, so a lenient matcher is a coin flip
+#| between the right library and a silent mis-link: libvips-cpp does
+#| export the C entry points (it links libvips) so the failure would
+#| not be a clean "symbol not found" — we'd just be dragging a whole
+#| C++ runtime into the process and pinning ourselves to a second
+#| ABI. Same trap for anything else sharing a prefix with
+#| libgobject-2.0.
+#|
+#| $ext is a parameter rather than the module-level constant so the
+#| matcher is unit-testable for all three platforms from any host.
+my sub _lib-name-match(Str $basename, Str $name, Str $ext --> Bool)
+    is export(:INTERNAL)
+{
+    return True if $basename eq "$name.$ext";
+
+    # ELF: everything after "<name>.<ext>." must be the version.
+    my Str $elf-prefix = "$name.$ext.";
+    if $basename.starts-with($elf-prefix) {
+        return _digit-run($basename.substr($elf-prefix.chars));
+    }
+
+    # Mach-O ("<name>.<version>.<ext>") and Windows
+    # ("<name>-<version>.<ext>") differ only in the separator, and
+    # in both cases the middle slice has to be a pure version.
+    my Str $tail = ".$ext";
+    return False unless $basename.ends-with($tail);
+    return False unless $basename.starts-with("$name.")
+                     || $basename.starts-with("$name-");
+    _digit-run($basename.substr(
+        $name.chars + 1,
+        $basename.chars - $name.chars - 1 - $tail.chars));
+}
+
+#| Strict lookup of $name in $dir; absolute path, or an undefined
+#| Str when the directory holds no match (or doesn't exist, or
+#| can't be read — an unreadable /usr/local/lib must not abort the
+#| whole probe).
+#|
+#| Entries are sorted before scanning: real installs routinely hold
+#| several acceptable variants (a Homebrew keg has both
+#| libvips.dylib and libvips.42.dylib), and a resolver that picks a
+#| different one depending on filesystem iteration order is a
+#| debugging nightmare. Exact name wins, then the first versioned
+#| match in sorted order.
+my sub _find-strict(IO::Path $dir, Str $name, Str $ext --> Str)
+    is export(:INTERNAL)
+{
+    return Str unless $dir.defined && $dir.d;
+
+    my $exact = $dir.add("$name.$ext");
+    return $exact.absolute if $exact.e;
+
+    for ((try $dir.dir.sort(*.basename)) // ()) -> $entry {
+        next unless $entry.e;   # skip dangling symlinks
+        return $entry.absolute
+            if _lib-name-match($entry.basename, $name, $ext);
     }
     Str;
 }
 
-#| Resolve a lib by name. Returns either an absolute path (env
-#| override or XDG-staged) or the bare short name (system loader
-#| fallback — e.g. 'vips', 'gobject-2.0' — which lets NativeCall
-#| use the OS dynamic loader to find a system-installed libvips).
-sub _resolve-lib(Str $name, Str $short-name --> Str) {
+# Lookup inside a directory *we* populated — the $VIPS_NATIVE_LIB_DIR
+# override or the staged prebuilt bundle.
+#
+# Strict first, so libvips.42.dylib always beats a co-packaged
+# libvips-cpp.42.dylib regardless of directory order. The historical
+# lenient rule stays as a backstop *only here*: these bundles are
+# produced by our own build-binaries.yml, so inside them an
+# unrecognised-but-genuine filename is a likelier failure mode than
+# a wrong-library collision. The system probe below gets no such
+# latitude — it walks directories full of other people's libraries.
+sub _find-in(IO::Path $dir, Str $name --> Str) {
+    with _find-strict($dir, $name, $ext) { return $_ }
+    return Str unless $dir.defined && $dir.d;
+
+    for ((try $dir.dir.sort(*.basename)) // ()) -> $entry {
+        next unless $entry.e;
+        my $bn = $entry.basename;
+        return $entry.absolute
+            if $bn.starts-with("$name.") && $bn.contains(".$ext");
+        return $entry.absolute
+            if $bn.starts-with("$name-") && $bn.ends-with(".$ext");
+    }
+    Str;
+}
+
+#| Directories named by the dynamic loader's own search-path env
+#| vars, in the order the loader itself consults them.
+#|
+#| We have to re-implement this search rather than lean on the
+#| loader: we hand dlopen an absolute path (see the header block on
+#| Callable-verbatim resolution), and once a path contains a slash
+#| the loader skips its env-var search entirely. Without this step a
+#| user's LD_LIBRARY_PATH / DYLD_LIBRARY_PATH pointing at a custom
+#| vips would be silently ignored in favour of a system one.
+my sub _loader-env-dirs(--> Seq) {
+    my @vars = $os ~~ /darwin/
+                    ?? <DYLD_LIBRARY_PATH DYLD_FALLBACK_LIBRARY_PATH>
+            !! $*DISTRO.is-win
+                    ?? <PATH>
+            !!         <LD_LIBRARY_PATH>;
+
+    @vars.map({ (%*ENV{$_} // '').split($env-path-sep) })
+         .flat
+         .grep(*.chars)
+         .map(*.IO);
+}
+
+# uname -m spellings that don't match the Debian multiarch tuple.
+constant %ARCH-ALIASES = %(
+    arm64 => 'aarch64',
+    amd64 => 'x86_64',
+    x64   => 'x86_64',
+    i486  => 'i386',
+    i586  => 'i386',
+    i686  => 'i386',
+);
+
+#| Debian/Ubuntu multiarch tuples to try (x86_64-linux-gnu,
+#| aarch64-linux-gnu, arm-linux-gnueabihf, …).
+#|
+#| Belt: compute the tuple from $*KERNEL.hardware, normalising the
+#| spellings that differ from uname -m (see %ARCH-ALIASES — notably
+#| 'arm64' on kernels that report the Apple/BSD spelling).
+#|
+#| Braces: also list whatever *-linux-* directories actually exist
+#| under /usr/lib and /lib. That covers the suffixed tuples
+#| (gnueabihf, musl), 32-bit arm, and any distro convention we
+#| haven't met. The computed tuple is ordered first because it's the
+#| right answer on every mainstream distro, so the common case
+#| resolves before we start probing globbed candidates.
+my sub _linux-multiarch-dirs(--> Seq) {
+    my Str $hw = ($*KERNEL.hardware // '').lc;
+    my Str $arch = %ARCH-ALIASES{$hw} // $hw;
+
+    # Braces around $arch: "$arch-linux-gnu" would parse the hyphens
+    # as part of the variable name.
+    my Str @tuples = $arch.chars ?? ("{$arch}-linux-gnu",) !! ();
+    for </usr/lib /lib> -> Str $root {
+        next unless $root.IO.d;
+        my @found = ((try $root.IO.dir(test => *.contains('-linux-')))
+                        // ()).grep(*.d).map(*.basename).sort;
+        @tuples.append: @found;
+    }
+
+    @tuples.unique.map({ ("/usr/lib/$_", "/lib/$_") }).flat;
+}
+
+#| The platform's conventional library directories, most-specific
+#| first.
+#|
+#| @formulae are Homebrew formula names known to ship the library
+#| we're after. They are load-bearing, not a nicety: a brew keg is
+#| reachable at <prefix>/opt/<formula>/lib whether or not it's
+#| linked into <prefix>/lib, and vips is very commonly left unlinked
+#| (it is on this author's machine — /opt/homebrew/lib has no
+#| libvips at all, while /opt/homebrew/opt/vips/lib has the whole
+#| keg). Probing only <prefix>/lib makes a perfectly good
+#| `brew install vips` invisible.
+my sub _platform-lib-dirs(@formulae --> Seq) {
+    my Str @dirs;
+
+    if $os ~~ /darwin/ {
+        # HOMEBREW_PREFIX first (custom prefixes are deliberate),
+        # then the two standard ones. /opt/local is MacPorts.
+        my Str @prefixes = ((%*ENV<HOMEBREW_PREFIX> // ''),
+                            '/opt/homebrew', '/usr/local'
+                           ).grep(*.chars).unique;
+        for @prefixes -> Str $prefix {
+            @dirs.push: "$prefix/lib";
+            @dirs.append: @formulae.map({ "$prefix/opt/$_/lib" });
+        }
+        @dirs.push: '/opt/local/lib';
+    }
+    elsif !$*DISTRO.is-win {
+        @dirs.append: _linux-multiarch-dirs();
+        @dirs.append: </usr/local/lib /usr/lib /usr/lib64 /lib /lib64>;
+    }
+    # Windows has no filesystem convention beyond the DLL search
+    # order, which is PATH — already covered by _loader-env-dirs.
+
+    @dirs.unique.map(*.IO);
+}
+
+#| Ask `ldconfig -p` for the loader cache listing. Returns '' when
+#| ldconfig is missing (musl, non-glibc, or simply not on a
+#| non-root PATH — hence the sbin fallbacks) or fails.
+#|
+#| Note the explicit Proc handling. A *sunk* failing Proc throws
+#| when it's GC'd, which is outside the `try` that was supposed to
+#| contain it — so the Proc is assigned, its handles are drained,
+#| and .exitcode is checked by hand.
+my sub _ldconfig-text(--> Str) {
+    for <ldconfig /sbin/ldconfig /usr/sbin/ldconfig> -> Str $exe {
+        my $proc = try run $exe, '-p', :out, :err;
+        next without $proc;
+        my Str $out = (try $proc.out.slurp(:close)) // '';
+        try $proc.err.slurp(:close);
+        next unless (try $proc.exitcode) === 0;
+        next unless $out.chars;
+        return $out;
+    }
+    '';
+}
+
+#| Pull the first strictly-matching library path out of `ldconfig -p`
+#| output. Lines look like (leading tab, parenthesised ABI tags):
+#|
+#|     libvips.so.42 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libvips.so.42
+#|
+#| Takes the text rather than running the subprocess so it can be
+#| unit-tested on any host. It does stat the arrow target, though:
+#| the cache regularly outlives the file it points at (package
+#| removed with no subsequent `ldconfig` run), and handing dlopen a
+#| path that isn't there would turn a recoverable miss into a hard
+#| failure. Matching is on the SONAME with the same strict rule as
+#| everywhere else, so a `libvips-cpp.so.42` entry is skipped.
+my sub _ldconfig-pick(Str $text, Str $name, Str $ext --> Str)
+    is export(:INTERNAL)
+{
+    for ($text // '').lines -> Str $line {
+        my ($lhs, $rhs) = $line.split(' => ', 2);
+        next unless $rhs.defined;
+        my Str $soname = $lhs.trim.words.head // '';
+        next unless _lib-name-match($soname, $name, $ext);
+        my Str $path = $rhs.trim;
+        next unless $path.chars && $path.IO.e;
+        return $path;
+    }
+    Str;
+}
+
+#| Locate a system-installed library. Always returns something
+#| dlopen-shaped: an absolute path when the probe hits, otherwise
+#| the fully-formed relative filename "$name.$ext" so the loader
+#| gets one more chance on its default search paths (and so the
+#| "Cannot locate native library" message names a real filename).
+#|
+#| Never returns a bare short name — see the header block.
+my sub _find-system-lib(Str $name, @formulae = () --> Str)
+    is export(:INTERNAL)
+{
+    for _loader-env-dirs() -> $dir {
+        with _find-strict($dir, $name, $ext) { return $_ }
+    }
+    for _platform-lib-dirs(@formulae) -> $dir {
+        with _find-strict($dir, $name, $ext) { return $_ }
+    }
+    unless $*DISTRO.is-win || $os ~~ /darwin/ {
+        with _ldconfig-pick(_ldconfig-text(), $name, $ext) { return $_ }
+    }
+    "$name.$ext";
+}
+
+#| Resolve a lib by stem (e.g. 'libvips'). Returns an absolute path
+#| from the $VIPS_NATIVE_LIB_DIR override, the staged prebuilt
+#| bundle or the system probe — falling back to the plain filename
+#| "$name.$ext" when nothing is found.
+#|
+#| :@formulae is the Homebrew formula hint threaded through to the
+#| system probe (see _platform-lib-dirs).
+#|
+#| There is deliberately no "short name" parameter any more. The
+#| result of this sub goes to dlopen() verbatim via
+#| `is native(&vips-lib)`, so returning 'vips' produces
+#| dlopen("vips"), which fails on every OS — that was the 0.6.0
+#| system-libvips regression. Anything this sub returns must be an
+#| absolute path or a complete filename.
+my sub _resolve-lib(Str $name, :@formulae --> Str) is export(:INTERNAL) {
     if (my $override = %*ENV<VIPS_NATIVE_LIB_DIR>) && $override.IO.d {
         with _find-in($override.IO, $name) { return $_ }
     }
     with _find-in(_staged-lib-dir(), $name) { return $_ }
-    $short-name;
+    _find-system-lib($name, @formulae);
 }
 
 #| Set an env var that will actually be visible to C `getenv()` in
@@ -153,6 +469,29 @@ sub _configure-runtime-env() {
     my $lib-dir = _staged-lib-dir();
     return without $lib-dir;
     return unless $lib-dir.d;
+
+    # The staged dir merely *existing* does not mean we're running
+    # the bundled libraries. On the system-libvips path Build.rakumod
+    # still creates it and drops the compiled varargs shim inside
+    # (and nothing else) — see !try-compile-shim. Everything below
+    # exists purely to correct prefixes baked into OUR bundle, and
+    # applying it to a system libvips actively breaks it:
+    #
+    #   * VIPSHOME would point the system libvips at a directory with
+    #     no vips-modules-<M>.<m>/ in it, so every split-out format
+    #     loader (pngload, jpegload, heifload, …) quietly vanishes.
+    #     Homebrew ships exactly that split layout, so this is the
+    #     macOS system lane, not a hypothetical.
+    #   * The GIO_MODULE_DIR sentinel would disable system glib's
+    #     extension modules for nothing. The duplicate-ObjC-class
+    #     crash it defends against needs a *second* libgio in the
+    #     process, which can only happen when we've loaded a bundled
+    #     one.
+    #
+    # So gate on libvips itself being staged. Strict matcher, because
+    # the dir also holds libvips_shim.<ext> and we want an
+    # unambiguous answer to "is the real libvips here".
+    return unless _find-strict($lib-dir, 'libvips', $ext).defined;
 
     if $*DISTRO.is-win {
         my $lib-str = $lib-dir.Str;
@@ -271,10 +610,19 @@ _configure-runtime-env();
 # sub-call means each process picks up the current tag, regardless
 # of when the precomp was built. `state $r` caches the result so
 # the lookup is O(1) after the first call. Pair with
-# `is native(&vips-lib)` on each binding (not `is native(&vips-lib)`)
-# so NativeCall invokes the resolver lazily.
-sub vips-lib    is export { state $r = _resolve-lib('libvips',        'vips');        $r }
-sub gobject-lib is export { state $r = _resolve-lib('libgobject-2.0', 'gobject-2.0'); $r }
+# `is native(&vips-lib)` on each binding (not `is native($vips-lib)`)
+# so NativeCall invokes the resolver lazily. Non-negotiable
+# consequence of the Callable form: whatever these return is passed
+# to dlopen unmangled — see the header block.
+#
+# The `formulae` hints are the Homebrew formulae that ship each
+# library — vips's own keg for libvips, glib's for libgobject-2.0.
+# They let the system probe find an *unlinked* keg under
+# <brew-prefix>/opt/<formula>/lib.
+# (List literals, not <vips> — a single-word <> yields a Str, which
+# won't bind to :@formulae.)
+sub vips-lib    is export { state $r = _resolve-lib('libvips',        formulae => ['vips']); $r }
+sub gobject-lib is export { state $r = _resolve-lib('libgobject-2.0', formulae => ['glib']); $r }
 
 # --- Varargs ABI shim ---
 #
