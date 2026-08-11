@@ -2,6 +2,9 @@ Revision history for Vips::Native
 
 {{$NEXT}}
 
+0.6.3  2026-08-11T15:38:39+01:00
+    - Attempt to fix CI
+ 
 0.6.2  2026-08-11T15:29:11+01:00
     - Fix the system-libvips fallback, a regression introduced in
       0.6.0. That release refactored the resolvers from
