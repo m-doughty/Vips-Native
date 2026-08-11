@@ -385,35 +385,80 @@ class Build {
     #| bindings — which work on x86_64 (no ABI divergence there).
     #| On arm64 without a shim, image loads may fail with garbage
     #| "no property named `…`" errors; the warning below says so.
+    #|
+    #| Freshness is content-based: a libvips_shim.<ext>.srchash
+    #| sidecar next to the staged shim records the SHA-256 of the
+    #| src/vips_native_shim.c it was compiled from (prebuilt bundles
+    #| should ship it; every successful local compile writes it).
+    #| mtimes are meaningless across machines — the dist tarball is
+    #| packaged after the binary bundle is built, so on a fresh
+    #| ecosystem install the extracted source always looked "newer"
+    #| than the bundled shim and forced the compile path even when
+    #| the bundle shipped a perfectly good shim (observed in
+    #| Notcurses-Native's identical method on a toolchain-less
+    #| Alpine CI container, 2026-08-11). Bundles that predate the
+    #| sidecar fall back to the mtime comparison. Successful
+    #| compiles also park a content-addressed copy under
+    #| <cache>/shims/<src-sha256>.<ext>, because !extract-archive
+    #| wipes the stage on every install — restoring from the cache
+    #| beats recompiling, and a machine that compiled once never
+    #| needs the toolchain again for the same shim source.
     method !try-compile-shim($dist-path, IO::Path $stage) {
         return if $*DISTRO.is-win;  # needs import libs; defer to prebuilt
 
         my Str $os = $*KERNEL.name.lc;
         my Str $ext = $os ~~ /darwin/ ?? 'dylib' !! 'so';
         my IO::Path $shim = $stage.add("libvips_shim.$ext");
+        my IO::Path $sidecar = $stage.add("libvips_shim.$ext.srchash");
 
         my Str $src = "$dist-path/src/vips_native_shim.c";
         return unless $src.IO.e;
 
-        # Skip rebuild only if the staged shim is at least as new as
-        # our source. This avoids stale shims when the prebuilt bundle
-        # ships an older shim than the source tree (e.g. you've added
-        # new shim functions locally — the prebuilt extract restores
-        # the older binary, and without this check try-compile-shim
-        # would silently leave it in place and bindings would die at
-        # NativeCall time with "Cannot locate symbol …").
+        my Str $src-hash = (try self!sha256($src.IO)) // Str;
+
+        # Skip rebuild only if the staged shim was built from the
+        # same shim source this dist ships (see doc above). Without
+        # this check a prebuilt bundle shipping an older shim than
+        # the source tree would silently stay in place and bindings
+        # would die at NativeCall time with "Cannot locate symbol …".
+        # The mtime branch only serves bundles that predate the
+        # sidecar (and systems where hashing itself failed).
         if $shim.e {
-            my $src-mtime  = $src.IO.modified // 0;
-            my $shim-mtime = $shim.modified  // 0;
-            if $shim-mtime >= $src-mtime {
-                return;
+            if $sidecar.e && $src-hash.defined {
+                my Str $packed = (try $sidecar.slurp.trim) // '';
+                return if $packed eq $src-hash;
+                say "🔁 Staged shim was built from different source — refreshing.";
             }
-            say "🔁 Source newer than staged shim — recompiling.";
+            else {
+                my $src-mtime  = $src.IO.modified // 0;
+                my $shim-mtime = $shim.modified  // 0;
+                if $shim-mtime >= $src-mtime {
+                    return;
+                }
+                say "🔁 Source newer than staged shim — refreshing.";
+            }
         }
 
         # Ensure the stage dir exists — for system-libvips paths
         # nothing else creates it.
         $stage.mkdir;
+
+        # Content-addressed build cache restore — no toolchain needed.
+        # The shim is relocatable on every platform we compile for
+        # (@loader_path install-name on macOS, no link-time deps on
+        # Linux), so a byte-identical copy is as good as a rebuild.
+        my IO::Path $shim-cache =
+            self!cache-dir(self!binary-tag($dist-path)).add('shims');
+        if $src-hash.defined {
+            my IO::Path $cached-shim = $shim-cache.add("$src-hash.$ext");
+            if $cached-shim.e {
+                $cached-shim.copy($shim);
+                $shim.chmod(0o755);
+                $sidecar.spurt("$src-hash\n");
+                say "✅ Restored varargs shim from build cache → $shim.";
+                return;
+            }
+        }
 
         my @cmd = do given $os {
             when /darwin/ {
@@ -440,6 +485,17 @@ class Build {
         my $err = $rc.err.slurp(:close);
         if $rc.exitcode == 0 {
             say "✅ Compiled varargs shim → $shim.";
+            # Stamp what we compiled (content match beats cross-machine
+            # mtime guesses) and park a copy in the build cache so the
+            # next install's wiped stage can restore instead of
+            # recompiling.
+            if $src-hash.defined {
+                try $sidecar.spurt("$src-hash\n");
+                try {
+                    $shim-cache.mkdir;
+                    $shim.copy($shim-cache.add("$src-hash.$ext"));
+                }
+            }
         }
         else {
             note "⚠️  Could not compile varargs shim ($shim): $err";

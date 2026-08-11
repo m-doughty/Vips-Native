@@ -399,6 +399,17 @@ jobs:
               bundle/libvips.42.dylib \
               "$GLIB_DYLIB"
 
+          # Sidecar for Build.rakumod's content-based freshness
+          # check: the SHA-256 of the shim source this shim was
+          # compiled from. Without it, installs fall back to a
+          # cross-machine mtime comparison that always thinks the
+          # dist's source is newer than the bundled shim and
+          # recompiles on every install (or warns without a
+          # toolchain — fatal for image loads on arm64, where the
+          # varargs ABI makes the shim mandatory).
+          shasum -a 256 src/vips_native_shim.c | awk '{print $1}' \
+            > bundle/libvips_shim.dylib.srchash
+
           # Symlinks for the unversioned name so resolution works
           # whether the caller asks for `libvips.dylib` or the
           # versioned `libvips.42.dylib`.
@@ -587,6 +598,11 @@ jobs:
               src/vips_native_shim.c \
               -Lbundle -lvips -lglib-2.0
           patchelf --set-rpath '$ORIGIN' bundle/libvips_shim.so
+          # Sidecar for Build.rakumod's content-based freshness
+          # check — see the macOS lane's comment for the full
+          # rationale.
+          sha256sum src/vips_native_shim.c | awk '{print $1}' \
+            > bundle/libvips_shim.so.srchash
 
           echo "--- bundle contents ---"
           ls -la bundle/
