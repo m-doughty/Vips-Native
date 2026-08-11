@@ -2,6 +2,25 @@ Revision history for Vips::Native
 
 {{$NEXT}}
 
+0.6.1  2026-08-11T14:46:26+01:00
+    - Bump BINARY_TAG to binaries-vips-8.18.2-r11 — first bundle
+      that ships the shim .srchash sidecar.
+    - Shim freshness is now content-based, not mtime-based. A
+      libvips_shim.<ext>.srchash sidecar (SHA-256 of the shim source)
+      ships in the prebuilt bundles and is written by every local
+      compile; the old mtime comparison made every fresh ecosystem
+      install think the dist's shim source was newer than the
+      bundle's prebuilt shim and recompiled on every install (found
+      via the identical bug in Notcurses-Native on a toolchain-less
+      Alpine CI container — on arm64 the Vips shim is mandatory, so
+      a toolchain-less machine lost image loading entirely despite
+      the bundle shipping a good shim).
+    - Successful shim compiles are parked in a content-addressed
+      build cache (<cache>/shims/<src-sha256>.<ext>), so a machine
+      that compiled once never recompiles for the same shim source +
+      binary tag, even though extraction wipes the staged dir on
+      every install.
+
 0.6.0  2026-08-10T20:09:05+01:00
     - In-memory decode + RGBA pipeline (for rendering encrypted /
       transient image bytes without spilling plaintext to disk):
