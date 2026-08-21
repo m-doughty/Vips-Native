@@ -3,6 +3,54 @@ unit module Vips::Native;
 use Vips::Native::FFI;
 use NativeCall;
 
+# --- init discipline ------------------------------------------------------
+#
+# vips_init is NOT safe to run lazily on a worker thread. Since the
+# bundle grew vips-modules (r11: heif/jxl/magick/openslide/poppler),
+# vips_init runs vips_load_plugins, which dlopens each module — and a
+# dlopen storm on a worker thread can deadlock against ANY other
+# thread's dlopen (observed 2026-08-11 in a consumer app, sampled live:
+# worker holds dyld's API lock inside vips_init → g_module_open →
+# dlopen → plugin initializers → libintl rwlock, while the main
+# thread's own unrelated dlopen waits on dyld's lock and every other
+# thread parks at MoarVM's GC barrier — total process freeze, no
+# error). The fix is to make init deterministic: exactly once, at
+# module load time, on the loading thread, before consumers spawn
+# workers or trigger competing lazy NativeCall setups.
+#
+# All public entry points call ensure-vips-init (idempotent,
+# lock-guarded) rather than vips_init directly, so a consumer that
+# somehow defeats INIT ordering still cannot double-init or race two
+# inits; the INIT phaser makes the normal path run at load time.
+# vips honours VIPS_NOVIPS in the environment to skip plugin loading
+# entirely — an escape hatch if a bundled module ever misbehaves.
+
+# INIT phasers in a precompiled unit fire BEFORE the module mainline,
+# so the lock cannot be built by a mainline initializer — the INIT
+# block below constructs it (single-threaded at that point) and the
+# defensive //= covers only the never-in-practice case of a caller
+# racing in before INIT has run.
+my Lock $vips-init-lock;
+my Bool $vips-initialised = False;
+
+#|( Initialise libvips exactly once, thread-safely. Runs at module
+    load via INIT; safe (and free) to call again from any entry
+    point. The C<$progname> only labels vips's error contexts, so
+    whichever caller gets there first wins it. )
+sub ensure-vips-init(Str $progname = 'raku-vips') is export {
+    ($vips-init-lock //= Lock.new).protect: {
+        unless $vips-initialised {
+            vips_init($progname);
+            $vips-initialised = True;
+        }
+    }
+}
+
+INIT {
+    $vips-init-lock //= Lock.new;
+    ensure-vips-init();
+}
+
 #|( Smart-crop + resize an image to fixed output dimensions, saving
     the result as a PNG. Uses libvips's "interesting"-driven
     smartcrop (saliency / entropy / attention) to pick the most
@@ -18,7 +66,7 @@ sub smart-resize(
 	Int $out-width,
 	Int $out-height --> Bool
 ) is export {
-	vips_init("vips-smart-resize");
+	ensure-vips-init("vips-smart-resize");
 	fail "No file found at $in-path" unless $in-path.IO.e && $in-path.IO.r;
 
 	# Load input
@@ -117,7 +165,7 @@ sub letterbox-to-buffer(
     fail "Background must be 3 RGB doubles, got @bg.elems()"
         unless @bg.elems == 3;
 
-    vips_init("vips-letterbox");
+    ensure-vips-init("vips-letterbox");
 
     my VipsImage $loaded = vips_image_new_from_file($path.Str, Str);
     fail "Could not load image: $path" unless $loaded.defined;
@@ -329,7 +377,7 @@ sub _rgba-from-vips(VipsImage $loaded --> RawRgba) {
     x86_64 + arm64. The shim ships in every prebuilt bundle. )
 multi decode-to-rgba(Blob:D $encoded --> RawRgba) is export {
     fail "Empty image buffer" unless $encoded.elems > 0;
-    vips_init("vips-decode-rgba");
+    ensure-vips-init("vips-decode-rgba");
 
     # Copy the encoded bytes into a native CArray we control. libvips
     # references this buffer lazily (it is NOT copied by
@@ -352,7 +400,7 @@ multi decode-to-rgba(Blob:D $encoded --> RawRgba) is export {
 
 multi decode-to-rgba(IO::Path:D $path --> RawRgba) is export {
     fail "No file found at $path" unless $path.e && $path.r;
-    vips_init("vips-decode-rgba");
+    ensure-vips-init("vips-decode-rgba");
 
     my VipsImage $loaded = vips_image_new_from_file($path.Str, Str);
     fail "Could not load image: $path" unless $loaded.defined;
@@ -386,7 +434,7 @@ sub smart-resize-buffer(
     fail "Empty input buffer" unless $in.elems > 0;
     fail "Output dimensions must be positive"
         unless $out-width > 0 && $out-height > 0;
-    vips_init("vips-smart-resize-buffer");
+    ensure-vips-init("vips-smart-resize-buffer");
 
     # Same lazy-buffer lifetime contract as decode-to-rgba — root the
     # encoded CArray across the pipeline (pngsave_buffer forces the read).
