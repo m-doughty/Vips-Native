@@ -32,7 +32,7 @@ use Test;
 # EVALFILE'd for Build::remove-tree, as t/10 and t/11 do.
 BEGIN EVALFILE $*PROGRAM.parent.parent.child('Build.rakumod').absolute;
 
-plan 5;
+plan 6;
 
 my IO::Path $dist   = $*PROGRAM.parent.parent;
 my IO::Path $script = $dist.add('scripts').add('ci').add('third-party.py');
@@ -178,9 +178,10 @@ sub conda-fixture(Str $name, %packages, :@extra-bundle --> IO::Path) {
 			$info.add('licenses').add($tname).spurt($content);
 		}
 		my ($url, $sha) = %p<source> // ("https://example.org/$pkg-{%p<version>}.tar.gz", $SHA);
+		my Str $source = %p<recipe-source>
+			// "source:\n  url: $url\n" ~ (%p<nosha> ?? '' !! "  sha256: $sha\n");
 		$info.add('recipe').add('meta.yaml').spurt(
-			"package:\n  name: $pkg\nsource:\n  url: $url\n"
-			~ (%p<nosha> ?? '' !! "  sha256: $sha\n") ~ "build:\n  number: 0\n");
+			"package:\n  name: $pkg\n" ~ $source ~ "build:\n  number: 0\n");
 		my Str $remote = %p<remote> // $pkg;
 		$info.add('about.json').spurt(json(home => "https://example.org/$pkg",
 			extra => { remote_url => "https://github.com/conda-forge/{$remote}-feedstock",
@@ -277,7 +278,7 @@ subtest 'conda: a bundle every file of which a package accounts for' => {
 };
 
 subtest 'conda: bundles that must stop a lane' => {
-	plan 24;
+	plan 26;
 	my %undisclosed = platforms => { macos-arm64 => { readme => 'macOS arm64', packages => {
 		libvips => 'libvips', fftw => 'FFTW', libgomp => 'libgomp', libfreetype6 => 'FreeType',
 		librsvg => 'librsvg', fribidi => 'fribidi' } } };
@@ -309,6 +310,14 @@ subtest 'conda: bundles that must stop a lane' => {
 		texts => ['COPYING'], nosha => True }));
 	($code, $, $err) = conda-kit($dir);
 	is $code, 1, 'a copyleft package whose source has no SHA-256';
+	ok $err.contains('no SHA-256 for a source of fftw (https://example.org/fftw-3.3.11.tar.gz)'),
+		'names it and the source' or diag $err;
+
+	$dir = conda-fixture('conda-no-source', conda-packages(fftw => { version => '3.3.11',
+		build => 'h0_0', license => 'GPL-2.0-or-later', files => ['libfftw3.3.dylib'],
+		texts => ['COPYING'], recipe-source => "source:\n  path: ../src\n" }));
+	($code, $, $err) = conda-kit($dir);
+	is $code, 1, 'a copyleft package whose recipe names no source archive';
 	ok $err.contains('no source archive with a SHA-256 for fftw'), 'names it' or diag $err;
 
 	$dir = conda-fixture('conda-freetype-bump', conda-packages(libfreetype6 => { version => '2.15.0',
@@ -460,6 +469,41 @@ sub mxe-kit(IO::Path $dir, %disclosed = %WINDOWS-DISCLOSED, Str :$manifest,
 		'--license-manifest', $manifest // $dir.add('windows/manifest.json').absolute,
 		'--disclosed', $dir.add('disclosed.json').absolute;
 }
+
+subtest 'conda: recipe sources, as conda-forge writes them' => {
+	plan 7;
+	my %fftw = version => '3.3.11', build => 'h0_0', license => 'GPL-2.0-or-later',
+		files => ['libfftw3.3.dylib'], texts => ['COPYING'];
+	my Str $fftw-sha = 'cd' x 32;
+	my Str $zlib-sha = 'ef' x 32;
+
+	# ctng-compilers (libgcc, libgomp, libstdcxx) lists mirrors under url:,
+	# its sha256 after the last of them, then a second source.
+	my $dir = conda-fixture('conda-mirrors', conda-packages(fftw => %(|%fftw, recipe-source =>
+		"source:\n  - url:\n      - https://example.org/fftw-3.3.11.tar.gz\n"
+		~ "      - https://mirror.example.org/fftw-3.3.11.tar.gz\n    sha256: $fftw-sha\n"
+		~ "    patches:\n      - patches/0001-fix.patch\n"
+		~ "  - url: https://example.org/zlib-1.3.1.tar.gz\n    sha256: $zlib-sha\n")));
+	my ($code, $, $err) = conda-kit($dir);
+	is $code, 0, 'a source with mirrors is written' or diag $err;
+	my Str $row = lines-starting(section($dir.add('bundle/THIRD-PARTY.md').slurp,
+		'Where to get the source'), '| fftw |').head // '';
+	ok $row.contains("<https://example.org/fftw-3.3.11.tar.gz><br>sha256 `$fftw-sha`"),
+		'its first url carries its own sha256' or diag $row;
+	ok $row.contains("<https://example.org/zlib-1.3.1.tar.gz><br>sha256 `$zlib-sha`"),
+		'the second source keeps its own' or diag $row;
+	nok $row.contains('mirror.example.org'), 'a mirror is not a source of its own';
+
+	$dir = conda-fixture('conda-unhashed-source', conda-packages(fftw => %(|%fftw, recipe-source =>
+		"source:\n  - url: https://example.org/fftw-3.3.11.tar.gz\n    sha256: $fftw-sha\n"
+		~ "  - url: https://example.org/extra-1.0.tar.gz\n")));
+	($code, $, $err) = conda-kit($dir);
+	is $code, 1, 'a copyleft package with one source and no sha256 stops the lane,'
+		~ ' however many others have one';
+	ok $err.contains('fftw') && $err.contains('https://example.org/extra-1.0.tar.gz'),
+		'  naming the package and the source' or diag $err;
+	nok $dir.add('bundle/THIRD-PARTY.md').e, '  and writing nothing';
+};
 
 subtest 'mxe: bundles the manifest covers' => {
 	plan 21;

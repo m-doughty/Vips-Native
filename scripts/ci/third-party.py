@@ -613,11 +613,17 @@ def check_disclosed(platform, licences, path):
 
 def check_sources(rows):
     """Fail unless every row of write_sources() names at least one source
-    archive with its SHA-256."""
+    archive, and every source it names has its SHA-256. A source dropped for
+    want of one would leave the row naming only the others: libgcc's once
+    read as built from zlib alone."""
     missing = [r[0] for r in rows if not r[3]]
     if missing:
         die('no source archive with a SHA-256 for %s: the "where we pull them from" half of '
             'the disclosure needs one for every copyleft component.' % and_list(missing))
+    unhashed = ['%s (%s)' % (r[0], u) for r in rows for u, d in r[3] if not d]
+    if unhashed:
+        die('no SHA-256 for a source of %s: every source a copyleft component was built '
+            'from is disclosed with the digest it was checked against.' % and_list(unhashed))
 
 
 # --- conda ----------------------------------------------------------------
@@ -639,9 +645,12 @@ def recipe_sources(pkg_dir):
             text = text.split('\nbuild_configuration:', 1)[0]
         out = []
         # A source entry is a url with its sha256 on the next line, or the
-        # sha256 first; only a sha256 counts as the digest.
+        # sha256 first; only a sha256 counts as the digest. A url: list
+        # names mirrors of one archive (ctng-compilers' GCC): the first
+        # stands for it, and the sha256 follows the last.
         for m in re.finditer(
-                r'^[ \t]*-?[ \t]*url:[ \t]*(?:\n[ \t]*-[ \t]*)?(https?://\S+)[ \t]*'
+                r'^[ \t]*-?[ \t]*url:[ \t]*(?:\n[ \t]*-[ \t]*)?(https?://\S+)'
+                r'(?:[ \t]*\n[ \t]*-[ \t]*https?://\S+)*[ \t]*'
                 r'(?:\n[ \t]*(?:-[ \t]*)?(sha256|md5):[ \t]*(\S+))?'
                 r'|^[ \t]*-?[ \t]*(sha256):[ \t]*(\S+)[ \t]*\n[ \t]*url:[ \t]*(https?://\S+)',
                 text, re.M):
@@ -808,7 +817,7 @@ def conda(args):
         r = p['record']
         if classify(r.get('license', '')) in COPYLEFT_CLASSES or name in listed:
             source_rows.append((name, r['version'], r.get('license', ''),
-                                [(u, d) for u, d in recipe_sources(pkg_dirs[name]) if d],
+                                recipe_sources(pkg_dirs[name]),
                                 feedstock_link(name, abouts[name])))
     check_sources(source_rows)
     acks = acknowledgements(OrderedDict((n, p['record']['version']) for n, p in packages.items()))
