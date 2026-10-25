@@ -1,0 +1,167 @@
+name: old-distros
+
+# What Vips::Native promises distributions older than the CI runners:
+#
+# 1. The Linux prebuilt installs on any glibc from 2.17 (Build.rakumod's
+#    $MIN-GLIBC; build-binaries.yml fails a pack that needs newer).
+#    Ubuntu 20.04 (glibc 2.31) gets it, and the whole suite passes
+#    against it. Its own libvips, 8.9, is below Vips::Native's floor
+#    (8.12), so a deliberate install against it is refused when the
+#    module loads, saying why.
+# 2. A system libvips at the floor works: Ubuntu 22.04's 8.12.1, through
+#    VIPS_NATIVE_PREFER_SYSTEM=1.
+#
+# GitHub dropped ubuntu-20.04 runners in April 2025, and no runner image
+# ships libvips 8.12, so both run in containers on ubuntu-latest.
+
+on:
+  push:
+    branches:
+      - '*'
+    tags-ignore:
+      - '*'
+  pull_request:
+
+jobs:
+  ubuntu-20-04-prebuilt:
+    name: Ubuntu 20.04 (glibc 2.31) → prebuilt / ${{ matrix.raku-version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # 2026.07: last legacy-frontend release. 2026.09: RakuAST is the default.
+        raku-version: ['2026.07', '2026.09']
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:20.04
+    defaults:
+      run:
+        shell: bash
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      NO_COLOR: '1'
+    steps:
+      - name: Install system deps
+        run: |
+          apt-get update
+          # No libvips yet: the prebuilt brings its own.
+          apt-get install -y --no-install-recommends curl ca-certificates git
+          ldd --version | head -n 1
+
+      - uses: actions/checkout@v6
+
+      - uses: Raku/setup-raku@v1
+        with:
+          raku-version: ${{ matrix.raku-version }}
+
+      - name: Install module (capture build log)
+        run: |
+          set -eo pipefail
+          zef install --/test --verbose . 2>&1 | tee build.log
+
+      - name: Assert the prebuilt was installed
+        run: |
+          if ! grep -F 'Installed prebuilt Vips binaries' build.log; then
+              echo "❌ Build did not install the prebuilt on $(ldd --version | head -n 1)."
+              echo "---- build.log tail ----"
+              tail -100 build.log
+              exit 1
+          fi
+          echo "✅ The prebuilt installed on glibc 2.31."
+
+      - name: Install App::Prove6
+        run: zef install --/test App::Prove6
+
+      - name: Run unit tests against the prebuilt
+        env:
+          # As test.yml: VIPS_WARNING silences libvips's warnings, the
+          # other two make libvips and GLib say what they load.
+          VIPS_WARNING: '1'
+          VIPS_INFO: '1'
+          G_MESSAGES_DEBUG: 'all'
+        run: prove6 --verbose -I lib t
+
+      - name: Install focal's libvips 8.9, below the floor
+        run: |
+          apt-get install -y --no-install-recommends build-essential pkg-config libvips-dev
+          dpkg -s libvips42 | grep -i '^version'
+
+      # As test.yml's system-libvips pass: a separate data dir, so the
+      # staged prebuilt above can't be found and resolution falls through
+      # to the system libvips. Build compiles the shim against it.
+      - name: Install Vips::Native against libvips 8.9
+        env:
+          VIPS_NATIVE_PREFER_SYSTEM: '1'
+          VIPS_NATIVE_DATA_DIR: /tmp/vips-native-system
+        run: zef install --/test --force-install .
+
+      - name: Assert libvips 8.9 is refused at load, saying why
+        env:
+          VIPS_NATIVE_DATA_DIR: /tmp/vips-native-system
+        run: |
+          set +e
+          raku -I lib -e 'use Vips::Native; say "loaded"' > load.out 2> load.err
+          rc=$?
+          set -e
+          cat load.out load.err
+          if (( rc == 0 )) || ! grep -F 'needs libvips 8.12 or later' load.err \
+                  || ! grep -F 'is 8.9.' load.err; then
+              echo "❌ Expected 'use Vips::Native' to die naming the 8.12 floor and libvips 8.9 (exit code $rc)."
+              exit 1
+          fi
+          echo "✅ libvips 8.9 is refused at load, with the reason."
+
+  ubuntu-22-04-system-libvips:
+    name: Ubuntu 22.04 → system libvips 8.12 (the floor) / ${{ matrix.raku-version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        raku-version: ['2026.07', '2026.09']
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:22.04
+    defaults:
+      run:
+        shell: bash
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      NO_COLOR: '1'
+      # The shim and nothing else lands here, so libvips resolves to the
+      # system one (see test.yml's system-libvips pass).
+      VIPS_NATIVE_DATA_DIR: /tmp/vips-native-system
+    steps:
+      - name: Install system deps and libvips
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+              build-essential pkg-config curl ca-certificates git libvips-dev
+          dpkg -s libvips42 | grep -i '^version'
+
+      - uses: actions/checkout@v6
+
+      - uses: Raku/setup-raku@v1
+        with:
+          raku-version: ${{ matrix.raku-version }}
+
+      - name: Install Vips::Native against the system libvips
+        env:
+          VIPS_NATIVE_PREFER_SYSTEM: '1'
+        run: zef install --/test --verbose .
+
+      - name: Assert the floor is what's under test
+        run: |
+          have=$(raku -I lib -e 'use Vips::Native::FFI; print vips-version()')
+          echo "libvips loaded: $have ($(raku -I lib -e 'use Vips::Native::FFI; print vips-lib()'))"
+          if [[ $have != 8.12.* ]]; then
+              echo "❌ Expected Ubuntu 22.04's libvips 8.12.x, the floor; got $have."
+              exit 1
+          fi
+
+      - name: Install App::Prove6
+        run: zef install --/test App::Prove6
+
+      - name: Run unit tests against libvips 8.12
+        env:
+          VIPS_WARNING: '1'
+          VIPS_INFO: '1'
+          G_MESSAGES_DEBUG: 'all'
+        run: prove6 --verbose -I lib t

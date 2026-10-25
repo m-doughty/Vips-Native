@@ -73,7 +73,10 @@ C<DYLD_FALLBACK_LIBRARY_PATH> on macOS, C<LD_LIBRARY_PATH> on Linux,
 C<PATH> on Windows), then the platform's library directories —
 including Homebrew's per-formula opt kegs, so an B<unlinked>
 C<brew install vips> is still found — and finally C<ldconfig -p>'s
-cache listing on Linux.
+cache listing on Linux. It must be libvips 8.12 or later (Ubuntu 22.04
+ships 8.12, Debian 12 8.14): an older one is refused when the module
+loads, with the version found and what to do. Older distributions get
+the prebuilt, which needs only glibc 2.17.
 =begin item
 On macOS:    C<brew install vips>
 =end item
@@ -94,7 +97,7 @@ directory is ignored, by everything, and the staged bundle is used.
 =head2 Supported platforms
 
 =item macOS arm64 (Apple silicon, macOS 11 or later)
-=item Linux x86_64 + aarch64 (glibc 2.35+)
+=item Linux x86_64 + aarch64 (glibc 2.17+)
 =item Windows x86_64 + arm64
 
 Every supported platform ships a working bundle with the varargs
@@ -252,7 +255,8 @@ To use no prebuilt at all, install with C<VIPS_NATIVE_PREFER_SYSTEM=1>:
 nothing is downloaded, C<Vips::Native> loads the libvips you installed
 yourself (see L<#INSTALLATION>), and the varargs shim is compiled from
 its source with your C compiler. C<VIPS_NATIVE_LIB_DIR> points it at a
-libvips of your own build instead. Platforms without a prebuilt
+libvips of your own build instead. Either way it must be libvips 8.12 or
+later. Platforms without a prebuilt
 (including x86_64 macOS) always take that path.
 
 =head1 EXTERNAL API

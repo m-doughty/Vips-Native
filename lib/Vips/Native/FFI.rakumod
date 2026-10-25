@@ -679,7 +679,7 @@ _configure-runtime-env();
 # header block.
 #
 # The memo itself is lock-guarded, and it has to be. These were
-# plain `state $r = <slow probe>` one-liners until 0.6.5, and a bare
+# plain `state $r = <slow probe>` one-liners until 0.7.0, and a bare
 # `state` initialiser is NOT thread-safe: the flag that marks the
 # slot initialised is set independently of the value landing in it,
 # so a second thread arriving mid-initialisation reads the slot and
@@ -841,6 +841,40 @@ constant VIPS_EXTEND_BACKGROUND is export = 5;
 
 # vips_init
 sub vips_init(Str --> int32) is native(&vips-lib) is export { * }
+
+# --- vips_version(int) ---
+# Not variadic: 0 asks for the major version, 1 the minor, 2 the micro.
+sub _vips-version(int32 --> int32)
+	is native(&vips-lib)
+	is symbol('vips_version') { * };
+
+#| The oldest libvips Vips::Native supports: the first with the
+#| C<fail_on> load option that strict decoding passes, and the one
+#| Ubuntu 22.04 ships. The prebuilt bundles carry a newer one.
+constant VIPS_MIN_VERSION is export = v8.12;
+
+#| The version of the libvips loaded, as major.minor.micro.
+sub vips-version(--> Version:D) is export {
+	_memoise 'version', {
+		Version.new: (_vips-version(0), _vips-version(1), _vips-version(2)).join('.')
+	}
+}
+
+#| Why a libvips of version $have, loaded from $path, can't be used —
+#| or Nil if it can.
+sub vips-version-problem(Version:D $have, Str $path --> Str) is export(:INTERNAL) {
+	return Nil unless $have cmp VIPS_MIN_VERSION == Less;
+	"Vips::Native needs libvips {VIPS_MIN_VERSION} or later, but the libvips "
+		~ "it loaded{$path ?? " ($path)" !! ''} is $have. Reinstall Vips::Native "
+		~ 'without VIPS_NATIVE_PREFER_SYSTEM, and run without VIPS_NATIVE_LIB_DIR, '
+		~ 'to use the libvips it bundles; or upgrade the system libvips.';
+}
+
+#| Die, saying why and what to do, if the libvips loaded is older than
+#| VIPS_MIN_VERSION.
+sub ensure-vips-version(--> Nil) is export {
+	with vips-version-problem(vips-version(), vips-lib()) { die $_ }
+}
 
 # VipsImage* is just an OpaquePointer
 class VipsImage is repr('CPointer') is export { }

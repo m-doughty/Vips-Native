@@ -38,10 +38,16 @@ my Bool $vips-initialised = False;
 #|( Initialise libvips exactly once, thread-safely. Runs at module
     load via INIT; safe (and free) to call again from any entry
     point. The C<$progname> only labels vips's error contexts, so
-    whichever caller gets there first wins it. )
+    whichever caller gets there first wins it.
+
+    Dies, before initialising anything, if the libvips loaded is older
+    than C<VIPS_MIN_VERSION> (8.12): only a system libvips can be,
+    and saying so at load beats failing later on an option that
+    libvips doesn't know. )
 sub ensure-vips-init(Str $progname = 'raku-vips') is export {
 	($vips-init-lock //= Lock.new).protect: {
 		unless $vips-initialised {
+			ensure-vips-version();
 			vips_init($progname);
 			$vips-initialised = True;
 		}

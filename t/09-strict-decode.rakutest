@@ -101,18 +101,27 @@ is-deeply px($alpha-strict, 0, 0), (255, 0, 0, 0).List, 'strict fixture keeps tr
 is-deeply px($alpha-strict, 7, 7), (0, 255, 0, 255).List, 'strict fixture keeps opaque RGBA pixel';
 
 {
+	# The child answers with its exit code, not its output: GLib writes
+	# its info messages to stdout, so under CI's VIPS_INFO=1 the child's
+	# stdout is mostly VIPS-INFO lines. Distinct codes also keep a child
+	# that dies (1) or is killed (signal, exit code 0) from passing.
+	my constant ACCEPTED = 10;
+	my constant REJECTED = 11;
 	my %env = %*ENV;
 	%env<VIPS_WARNING> = '1';
 	my $child = run $*EXECUTABLE.absolute,
 		'-I' ~ $*PROGRAM.parent.parent.add('lib').absolute,
 		'-e', 'use Vips::Native; '
 			~ "my \$png = Buf[uint8].new({bad-framed-png().list.join(',')}); "
-			~ 'print decode-to-rgba($png, :strict).so ?? q{accepted} !! q{rejected}',
+			~ "exit decode-to-rgba(\$png, :strict).so ?? {ACCEPTED} !! {REJECTED}",
 		:%env, :out, :err;
-	my Str $said = $child.out.slurp(:close);
-	my Str $err  = $child.err.slurp(:close);
-	is $said, 'rejected', 'strict decode rejects well-framed corrupt PNG during materialisation'
-		or diag "exit code {$child.exitcode}; child stderr:\n$err";
+	my Str $out = $child.out.slurp(:close);
+	my Str $err = $child.err.slurp(:close);
+	ok $child.exitcode == REJECTED && $child.signal == 0,
+		'strict decode rejects well-framed corrupt PNG during materialisation'
+		or diag ($child.exitcode == ACCEPTED ?? 'the child accepted it'
+			!! "exit code {$child.exitcode}, signal {$child.signal}")
+			~ "; child stdout:\n$out\nchild stderr:\n$err";
 }
 nok decode-to-rgba(buf8.new, :strict).so, 'strict decode rejects empty buffer cleanly';
 nok decode-to-rgba(Buf[uint8].new(1, 2, 3, 4, 5), :strict).so, 'strict decode rejects garbage bytes cleanly';

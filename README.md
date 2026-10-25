@@ -45,7 +45,7 @@ INSTALLATION
 
   * **Prebuilt bundle (default)** — fetched from the project's GitHub Releases at install time, sha256-pinned against `resources/checksums.txt`, staged under `$XDG_DATA_HOME/Vips-Native/<binary-tag>/lib/`. Bundles include libvips, libglib, libgio, libgobject, the format loaders (jpeg/png/webp/tiff/gif/svg/heif/avif/jxl/openslide/pdf, and magick on Windows only) and all their transitive deps with `@loader_path` (macOS) / `$ORIGIN` (Linux) / sibling-DLL (Windows) relocations baked in, so the bundle is self-contained — and a `THIRD-PARTY.md` + `LICENSES/` notices kit, staged beside the libraries (see *BINARY DISTRIBUTIONS AND LICENSING* below).
 
-  * **System libvips** — fallback when the prebuilt download fails or no prebuilt exists for your platform. `Vips::Native` probes for an installed libvips itself and loads it by absolute path: first the dynamic loader's own search variables (`DYLD_LIBRARY_PATH` and `DYLD_FALLBACK_LIBRARY_PATH` on macOS, `LD_LIBRARY_PATH` on Linux, `PATH` on Windows), then the platform's library directories — including Homebrew's per-formula opt kegs, so an **unlinked** `brew install vips` is still found — and finally `ldconfig -p`'s cache listing on Linux.
+  * **System libvips** — fallback when the prebuilt download fails or no prebuilt exists for your platform. `Vips::Native` probes for an installed libvips itself and loads it by absolute path: first the dynamic loader's own search variables (`DYLD_LIBRARY_PATH` and `DYLD_FALLBACK_LIBRARY_PATH` on macOS, `LD_LIBRARY_PATH` on Linux, `PATH` on Windows), then the platform's library directories — including Homebrew's per-formula opt kegs, so an **unlinked** `brew install vips` is still found — and finally `ldconfig -p`'s cache listing on Linux. It must be libvips 8.12 or later (Ubuntu 22.04 ships 8.12, Debian 12 8.14): an older one is refused when the module loads, with the version found and what to do. Older distributions get the prebuilt, which needs only glibc 2.17.
 
   * On macOS: `brew install vips`
 
@@ -58,7 +58,7 @@ Supported platforms
 
   * macOS arm64 (Apple silicon, macOS 11 or later)
 
-  * Linux x86_64 + aarch64 (glibc 2.35+)
+  * Linux x86_64 + aarch64 (glibc 2.17+)
 
   * Windows x86_64 + arm64
 
@@ -122,7 +122,7 @@ Where the packs come from:
 
 Each macOS and Linux pack's `THIRD-PARTY.md` lists every package of the environment the pack was cut from, by version and build string — those that contribute no file to it too, ImageMagick among them (pinned to conda-forge's `imagemagick_*` builds, which declare ImageMagick's own licence, rather than the `agpl_*` builds of the same libraries) — and, for every package in the pack, the conda-forge recipe at the commit that built it and the upstream source archive.
 
-To use no prebuilt at all, install with `VIPS_NATIVE_PREFER_SYSTEM=1`: nothing is downloaded, `Vips::Native` loads the libvips you installed yourself (see [INSTALLATION](#INSTALLATION)), and the varargs shim is compiled from its source with your C compiler. `VIPS_NATIVE_LIB_DIR` points it at a libvips of your own build instead. Platforms without a prebuilt (including x86_64 macOS) always take that path.
+To use no prebuilt at all, install with `VIPS_NATIVE_PREFER_SYSTEM=1`: nothing is downloaded, `Vips::Native` loads the libvips you installed yourself (see [INSTALLATION](#INSTALLATION)), and the varargs shim is compiled from its source with your C compiler. `VIPS_NATIVE_LIB_DIR` points it at a libvips of your own build instead. Either way it must be libvips 8.12 or later. Platforms without a prebuilt (including x86_64 macOS) always take that path.
 
 EXTERNAL API
 ============

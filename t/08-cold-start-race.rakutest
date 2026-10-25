@@ -5,7 +5,7 @@ use NativeCall;
 use nqp;
 use Vips::Native::FFI;
 
-# Regression guard for the cold-start resolver race fixed in 0.6.5.
+# Regression guard for the cold-start resolver race fixed in 0.7.0.
 #
 # The library-path resolvers in Vips::Native::FFI (vips-lib,
 # gobject-lib, shim-lib, USE-SHIM, cstdlib-lib) memoise a slow probe
@@ -72,7 +72,7 @@ for (vips-lib    => &vips-lib,
 # resolved name handed to dlopen verbatim. A name dlopen refuses there
 # (an empty one: macOS's dlopen("") fails) leaves the site reading as
 # unbuilt forever, so every recording rebuilds it in place while other
-# threads copy it half-written. That was the cold-start crash 0.6.5
+# threads copy it half-written. That was the cold-start crash 0.7.0
 # fixes — the burst below only catches it a few launches in a hundred,
 # this catches its cause every time. Bind memcpy the way FFI.rakumod
 # does, call it once, and the site must read as built.

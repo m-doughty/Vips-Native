@@ -12,7 +12,7 @@
 #|      staged with them.
 #|      Archive format is .tar.gz on Unix and .zip on Windows. SHA256
 #|      verified against bundled resources/checksums.txt. Platforms:
-#|      macOS arm64 (macOS 11+), Linux x86_64 + aarch64 (glibc 2.35+),
+#|      macOS arm64 (macOS 11+), Linux x86_64 + aarch64 (glibc 2.17+),
 #|      Windows x86_64 + arm64.
 #|
 #|   2. Fallback: do nothing, let Native.rakumod resolve `vips` and
@@ -24,13 +24,14 @@
 #|      meson build would dwarf the whole rest of the install — the
 #|      pragmatic fallback is "you install libvips yourself".
 #|
-#| Linux prebuilts are built on ubuntu-22.04 (glibc 2.35 — see the
-#| $MIN-GLIBC constant). On systems with older glibc (Ubuntu 20.04 /
-#| Debian 11 / RHEL 8 / etc.) the prebuilt libvips loads but dies at
-#| first symbol use with "GLIBC_2.xx not found". Build detects this
-#| via `ldd --version` and short-circuits to the system-libvips
-#| fallback (Native.rakumod resolves via the OS loader) before the
-#| download even happens.
+#| Linux prebuilts are conda-forge builds against glibc 2.17 (see the
+#| $MIN-GLIBC constant), so they load on every glibc distribution
+#| still in use — Ubuntu 20.04, Debian 11 and RHEL 8 included.
+#| build-binaries.yml fails a pack with a library that needs newer.
+#| Below $MIN-GLIBC the prebuilt would load but die at first symbol
+#| use with "GLIBC_2.xx not found", so Build detects that via
+#| `ldd --version` and short-circuits to the system-libvips fallback
+#| before the download even happens.
 #|
 #| Why we don't use META6 resources for the libs: zef hashes every
 #| staged resource filename, breaking the inter-lib references baked
@@ -66,12 +67,14 @@ class Build {
 	constant $DEFAULT-BASE-URL =
 		'https://github.com/m-doughty/Vips-Native/releases/download';
 
-	# Minimum glibc the prebuilt Linux archives are compatible with.
-	# The CI workflow builds on ubuntu-22.04 (glibc 2.35); libvips +
-	# its format deps reference GLIBC_2.3x versioned symbols so
-	# loading on older systems fails with "GLIBC_2.xx not found".
-	# Bump in lockstep with the CI runner OS.
-	constant $MIN-GLIBC = v2.35;
+	# Minimum glibc the prebuilt Linux archives are compatible with:
+	# the newest GLIBC_x.y symbol version any library in them needs.
+	# The packs are conda-forge builds against its glibc 2.17 sysroot.
+	# build-binaries.yml reads this line (scripts/ci/check-glibc-floor.sh)
+	# and fails a pack that needs newer, so a conda-forge sysroot bump
+	# can't silently strand older distributions: raise it here, with the
+	# README's platform list, if that check ever trips.
+	constant $MIN-GLIBC = v2.17;
 
 	# Map (OS, hardware) → platform slug used in release artefact
 	# filenames + cache paths: the five platforms the upstream
@@ -128,10 +131,10 @@ class Build {
 			return True;
 		}
 
-		# Guard: prebuilt Linux archives are built on ubuntu-22.04
-		# (glibc $MIN-GLIBC). On older glibc the downloaded libvips
-		# loads but dies at first symbol use with "GLIBC_2.xx not
-		# found". Detect here and skip the download — Native.rakumod
+		# Guard: prebuilt Linux archives need glibc $MIN-GLIBC or
+		# later. On older glibc the downloaded libvips loads but dies
+		# at first symbol use with "GLIBC_2.xx not found". Detect
+		# here and skip the download — Native.rakumod
 		# falls through to system libvips at first FFI call, which is
 		# this module's existing degraded-mode behaviour.
 		if $plat.ends-with('-glibc') {

@@ -41,7 +41,7 @@ name: build-binaries
 #     recipe can never overwrite the assets every installed dist
 #     checksum-verifies against.
 #   * branch pushes never run this workflow; test.yml and
-#     glibc-fallback.yml are the CI for those.
+#     old-distros.yml are the CI for those.
 
 on:
   workflow_dispatch:
@@ -229,6 +229,12 @@ jobs:
           PACK_NAME: vips-${{ matrix.platform }}.tar.gz
         run: bash scripts/ci/bundle-linux.sh "$ENV_LIB" bundle
 
+      # Build installs the prebuilt on any glibc from its $MIN-GLIBC
+      # (2.17, conda-forge's sysroot). A library needing newer would
+      # load here and die on an older distribution, so it fails the lane.
+      - name: Every library loads on Build's oldest glibc
+        run: bash scripts/ci/check-glibc-floor.sh bundle Build.rakumod
+
       - name: Package archive
         run: |
           set -euxo pipefail
@@ -238,9 +244,10 @@ jobs:
           mkdir -p artefacts
           mv "$artifact" "${artifact}.sha256" artefacts/
 
-      # Runs on the build image itself (ubuntu-22.04, glibc 2.35 — the
-      # oldest system the Linux prebuilts promise), so a library that
-      # needs a newer glibc or C++ runtime than that fails here.
+      # Runs on the build image itself, so a library that needs a newer
+      # glibc or C++ runtime than the runner's fails here. The older
+      # glibc the prebuilts promise (Build's $MIN-GLIBC) is checked by
+      # symbol version above, and run on Ubuntu 20.04 by old-distros.yml.
       - name: Probe the archive (every loader decodes; self-contained)
         run: bash scripts/ci/probe-bundle.sh "artefacts/vips-${{ matrix.platform }}.tar.gz" "${{ steps.vars.outputs.binary_tag }}"
 

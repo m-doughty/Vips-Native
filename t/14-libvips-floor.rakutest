@@ -1,0 +1,40 @@
+use Test;
+use Vips::Native;
+use Vips::Native::FFI :DEFAULT, :INTERNAL;
+
+# Vips::Native supports libvips 8.12 and later: the first with the
+# fail_on load option strict decoding passes, and the one Ubuntu 22.04
+# ships. The prebuilt bundles carry a newer libvips, so only a system
+# libvips can be older; ensure-vips-init refuses one at module load,
+# saying what to do. The refusal itself runs in CI against Ubuntu
+# 20.04's libvips 8.9 (.github/workflows/old-distros.yml); this file
+# checks the version the module loaded and the floor's arithmetic.
+#
+# Flat assertions (not subtests): CI runs prove6 --verbose with
+# VIPS_INFO=1, and libvips's unindented VIPS-INFO lines break TAP
+# plan-parsing inside a subtest. See t/04-letterbox.rakutest.
+
+plan 14;
+
+is VIPS_MIN_VERSION, v8.12, 'the floor is libvips 8.12';
+
+my Version $loaded = vips-version();
+ok $loaded.defined && $loaded.parts.elems == 3, "the libvips loaded reports major.minor.micro ($loaded)";
+ok ($loaded cmp VIPS_MIN_VERSION) != Less, 'the libvips loaded is at or above the floor';
+lives-ok { ensure-vips-version() }, 'so ensure-vips-version accepts it';
+ok vips-version() === $loaded, 'the version is read once and kept';
+
+my Str $why = vips-version-problem(v8.9.1, '/usr/lib/x86_64-linux-gnu/libvips.so.42') // '';
+ok $why.contains('needs libvips 8.12 or later'), 'libvips 8.9.1 is refused, naming the floor' or diag $why;
+ok $why.contains('is 8.9.1'), '  and the version it found';
+ok $why.contains('(/usr/lib/x86_64-linux-gnu/libvips.so.42)'), '  and where it was loaded from';
+ok $why.contains('VIPS_NATIVE_PREFER_SYSTEM') && $why.contains('VIPS_NATIVE_LIB_DIR'),
+	'  and how to get the bundled libvips instead';
+
+$why = vips-version-problem(v8.11.4, Str) // '';
+ok $why.contains('is 8.11.4') && !$why.contains('()'), 'the last release below the floor, with no path to name';
+ok vips-version-problem(v7.42.3, Str).defined, 'an older major version is refused too';
+
+nok vips-version-problem(v8.12.0, Str).defined, '8.12.0 is accepted';
+nok vips-version-problem(v8.12.1, Str).defined, 'as is Ubuntu 22.04\'s 8.12.1';
+nok vips-version-problem(v9.0.0, Str).defined, 'and a later major version';
