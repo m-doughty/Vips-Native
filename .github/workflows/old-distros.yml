@@ -45,7 +45,9 @@ jobs:
           apt-get update
           # No libvips yet: the prebuilt brings its own.
           apt-get install -y --no-install-recommends curl ca-certificates git
-          ldd --version | head -n 1
+          # sed, not head: head stops reading after one line, ldd dies of
+          # SIGPIPE, and the step's pipefail fails it (exit code 141).
+          ldd --version | sed -n 1p
 
       - uses: actions/checkout@v6
 
@@ -61,7 +63,7 @@ jobs:
       - name: Assert the prebuilt was installed
         run: |
           if ! grep -F 'Installed prebuilt Vips binaries' build.log; then
-              echo "❌ Build did not install the prebuilt on $(ldd --version | head -n 1)."
+              echo "❌ Build did not install the prebuilt on $(ldd --version | sed -n 1p)."
               echo "---- build.log tail ----"
               tail -100 build.log
               exit 1

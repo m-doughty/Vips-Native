@@ -97,7 +97,9 @@ jobs:
         run: |
           dist="$RUNNER_TEMP/vips-native-dist"
           mkdir -p "$dist"
-          git archive HEAD | tar -x -C "$dist"
+          # Extract from inside: tar reads -C's Windows path (D:\a\...)
+          # as host:path and fails.
+          git archive HEAD | (cd "$dist" && tar -x)
           rm -r "$dist/.github" "$dist/.gitignore"
           zef install --force-install "$dist"
 
