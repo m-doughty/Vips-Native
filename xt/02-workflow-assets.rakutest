@@ -1,0 +1,36 @@
+use Test;
+
+# Build.rakumod is the dist's `build:` script, not a module in `provides`,
+# so it is EVALFILE'd at BEGIN time to bring the class into scope (as
+# t/11-build-platform does).
+BEGIN EVALFILE $*PROGRAM.parent.parent.child('Build.rakumod').absolute;
+
+# Every prebuilt asset Build can ask for is one build-binaries.yml builds.
+# The drift this catches: Build asking for an asset name the release does
+# not publish (the r12 universal-archive plan would have been exactly
+# that), which installs as "checksum missing" and silently falls back to
+# whatever system libvips there is. t/11-build-platform checks each is
+# pinned in resources/checksums.txt.
+#
+# Why xt/ and not t/: the workflow lives in .github/, which mi6 leaves out
+# of the distribution, so on a user's install there is nothing to read.
+# 0.7.0 shipped this check in t/ and failed every install. test.yml runs
+# this file on every push.
+
+my IO::Path $dist = $*PROGRAM.parent.parent;
+my IO::Path $file = $dist.add('.github/workflows/build-binaries.yml');
+
+# Each platform slug Build maps an OS and hardware pair to (t/11 checks
+# the mapping itself).
+my @slugs = <macos-arm64 linux-x86_64-glibc linux-aarch64-glibc windows-x86_64 windows-arm64>;
+my @assets = @slugs.map({ Build::artifact-name($_) });
+
+plan @assets.elems + 1;
+
+ok $file.f, '.github/workflows/build-binaries.yml exists';
+my Str $workflow = $file.f ?? $file.slurp !! '';
+my %built is Set = |$workflow.comb(/ 'artifact="' <( 'vips-' <-["$]>+ )> '"' /),
+	|$workflow.comb(/ ^^ \s* 'platform:' \s* <( \S+ )> $$ /).map({ Build::artifact-name($_) });
+for @assets -> $asset {
+	ok %built{$asset}, "$asset is built by build-binaries.yml";
+}

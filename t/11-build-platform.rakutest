@@ -7,8 +7,9 @@ BEGIN EVALFILE $*PROGRAM.parent.parent.child('Build.rakumod').absolute;
 
 # Which prebuilt an install asks for, and what it accepts as one: the
 # platform slug for each OS/hardware pair Raku reports, the asset that
-# slug downloads, that every such asset is one the release workflow
-# builds and resources/checksums.txt pins, what an x86_64 macOS install
+# slug downloads, that resources/checksums.txt pins every such asset
+# (xt/02-workflow-assets checks the release workflow builds each one: the
+# workflow is not in the distribution), what an x86_64 macOS install
 # is told instead, and that an unpacked archive is only accepted with its
 # THIRD-PARTY.md + LICENSES/ notices kit beside the libraries.
 
@@ -75,20 +76,16 @@ subtest 'artifact-name: the asset a slug downloads' => {
 	is Build::artifact-name('windows-arm64'), 'vips-windows-arm64.zip', 'Windows: a zip';
 };
 
-subtest 'every selectable asset is built by the workflow and pinned' => {
-	# The drift this catches: Build asking for an asset name the release
-	# does not publish (the r12 universal-archive plan would have been
-	# exactly that), which installs as "checksum missing" and silently
-	# falls back to whatever system libvips there is.
+subtest 'every selectable asset is pinned' => {
+	# The drift this catches: Build asking for an asset with no checksum,
+	# which installs as "checksum missing" and silently falls back to
+	# whatever system libvips there is. Only files the distribution ships
+	# are read here: this runs on every user's install.
 	my @assets = %expected.values.unique.sort.map({ Build::artifact-name($_) });
-	plan @assets.elems * 2;
-	my Str $workflow = $dist.add('.github/workflows/build-binaries.yml').slurp;
+	plan @assets.elems;
 	my %pinned is Set = $dist.add('resources/checksums.txt').slurp.lines
 		.grep({ .chars && !.starts-with('#') }).map({ .words[1] // '' });
-	my %built is Set = |$workflow.comb(/ 'artifact="' <( 'vips-' <-["$]>+ )> '"' /),
-		|$workflow.comb(/ ^^ \s* 'platform:' \s* <( \S+ )> $$ /).map({ Build::artifact-name($_) });
 	for @assets -> $asset {
-		ok %built{$asset}, "$asset is built by build-binaries.yml";
 		ok %pinned{$asset}, "$asset has a checksum in resources/checksums.txt";
 	}
 };

@@ -62,10 +62,13 @@ jobs:
       - name: Run unit tests — prebuilt path
         shell: bash
         env:
-          # VIPS_INFO and G_MESSAGES_DEBUG make libvips and GLib chatty
-          # on stderr: if a load fails, the log says why instead of the
-          # test seeing a silent NULL return. Test output is TAP on
-          # stdout, so the extra lines don't break the plan parser.
+          # VIPS_INFO and G_MESSAGES_DEBUG make libvips and GLib chatty:
+          # if a load fails, the log says why instead of the test seeing
+          # a silent NULL return. GLib writes those info lines to STDOUT,
+          # among the TAP: unindented, so they break a subtest's plan
+          # parsing (tests that need it use flat assertions), and a test
+          # must not compare a child process's stdout (t/08 and t/09
+          # answer with exit codes).
           # VIPS_WARNING does the opposite: set to anything, it SILENCES
           # libvips's warnings (libvips reads it once, in vips_init), so
           # this lane does not see them. The suite does not depend on it:
@@ -76,6 +79,27 @@ jobs:
           VIPS_INFO: '1'
           G_MESSAGES_DEBUG: 'all'
         run: prove6 --verbose -I lib t
+
+      # Checks of files mi6 leaves out of the distribution (.github/),
+      # which therefore can't be t/ tests: t/ runs on every user's
+      # install, where they are absent.
+      - name: Repository checks
+        shell: bash
+        run: prove6 --verbose -I lib xt/02-workflow-assets.rakutest
+
+      # Install as a user does: from only the files mi6 puts in the
+      # distribution, with zef running t/. mi6 ships every tracked file
+      # but .github/, .gitignore, .precomp and a few dead CI configs, so
+      # a t/ test that reads one of those passes above, against the
+      # checkout, and fails every install — 0.7.0's t/11 did.
+      - name: Install from the files the distribution ships
+        shell: bash
+        run: |
+          dist="$RUNNER_TEMP/vips-native-dist"
+          mkdir -p "$dist"
+          git archive HEAD | tar -x -C "$dist"
+          rm -r "$dist/.github" "$dist/.gitignore"
+          zef install --force-install "$dist"
 
       # Diagnostic — only runs if prove6 just failed. Dumps the
       # full FFI/runtime picture so the next push doesn't need to

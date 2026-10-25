@@ -2,6 +2,15 @@ Revision history for Vips::Native
 
 {{$NEXT}}
 
+0.7.1  2026-10-25T21:52:55Z
+    - BUGFIX: [2026-10-25] 0.7.0 failed to install: t/11-build-platform
+      read .github/workflows/build-binaries.yml, which the distribution
+      does not ship, and died. t/11 now reads only shipped files; its
+      check that the release workflow builds every asset Build can ask
+      for is xt/02-workflow-assets, which test.yml runs on every push.
+    - CI: [2026-10-25] test.yml also installs from only the files the
+      distribution ships, with zef running t/, as a user's install does.
+
 0.7.0  2026-10-25T21:32:18Z
     - CHANGE: [2026-10-25] The Linux prebuilts install on glibc 2.17 and
       later, where Build asked for 2.35: they are conda-forge builds
