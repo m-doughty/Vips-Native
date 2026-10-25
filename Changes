@@ -2,6 +2,327 @@ Revision history for Vips::Native
 
 {{$NEXT}}
 
+0.7.0  2026-10-25T21:32:18Z
+    - CHANGE: [2026-10-25] The Linux prebuilts install on glibc 2.17 and
+      later, where Build asked for 2.35: they are conda-forge builds
+      against glibc 2.17, and no library in them needs newer. Ubuntu
+      20.04, Debian 11 and RHEL 8 now get the prebuilt instead of falling
+      back to their own, older libvips. A Linux pack fails to build if a
+      library in it needs a glibc newer than Build's $MIN-GLIBC
+      (scripts/ci/check-glibc-floor.sh).
+    - CHANGE: [2026-10-25] Vips::Native needs libvips 8.12 or later: the
+      first with the fail_on load option that strict decoding passes
+      (against libvips 8.9, every strict decode failed), and the libvips
+      Ubuntu 22.04 ships. Only a system libvips can be older -- the
+      prebuilts carry 8.18.7 -- and an older one is refused when the
+      module loads, naming its version, where it was loaded from, and
+      how to use the bundled libvips instead. Vips::Native::FFI exports
+      vips-version, VIPS_MIN_VERSION and ensure-vips-version.
+    - CI: [2026-10-25] old-distros.yml replaces glibc-fallback.yml.
+      Ubuntu 20.04 gets the prebuilt and runs the suite against it, then
+      checks that its own libvips 8.9 is refused at load; Ubuntu 22.04
+      runs the suite against its system libvips 8.12.1, the floor.
+    - TEST: [2026-10-25] t/09's child process answers with its exit code
+      rather than its output: GLib writes VIPS_INFO's messages to stdout,
+      so under CI's VIPS_INFO=1 the expected word was buried. New
+      t/13-license-texts checks that every Windows licence text the
+      manifest lists is in the repository; t/14-libvips-floor checks the
+      libvips version loaded and the floor's arithmetic.
+    - CHANGE: [2026-10-25] The macOS arm64 and Linux prebuilts carry no
+      ImageMagick. conda-forge's ImageMagick links Graphviz, whose
+      EPL-1.0 the FSF reads as incompatible with the GPL code (FFTW,
+      poppler) in the same packs, so those packs leave out libvips's
+      ImageMagick module and everything only it needed: ImageMagick,
+      Graphviz, OpenEXR. They have no magickload or magicksave, so the
+      formats only ImageMagick reads -- BMP, ICO and CUR, PSD, TGA,
+      OpenEXR, DDS, DPX, PCX, QOI, SGI, Sun raster, XBM, XPM, PAM, MIFF,
+      MNG and JNG, MATLAB and VIFF files among them -- no longer open
+      there. The r11 macOS pack opened them; no Linux pack ever did. The
+      Windows packs keep ImageMagick. Both bundlers fail a pack holding
+      an ImageMagick or Graphviz library, and the release probe fails a
+      macOS or Linux pack where magickload is registered (its GIF fixture
+      is now written by hand: these builds have no GIF saver).
+    - CHANGE: [2026-10-25] The Windows prebuilts carry every component's
+      own licence texts (some 330 files), taken from the source each was
+      built from, where they carried libvips's alone and flagged the
+      rest. scripts/ci/license-texts/windows/manifest.json lists each
+      component's SPDX licence, version, source archive and texts, every
+      text with its SHA-256; THIRD-PARTY.md names each component's
+      licence and source. Components built into another's DLL ship with
+      it: the mingw-w64 runtime and LLVM's compiler-rt (every DLL),
+      proxy-libintl (GLib), the Rust crates and standard library
+      (librsvg), Imath (OpenEXR), uthash (libdicom). libvips's licence
+      ships once, as LICENSES/vips/LICENSE. A Windows pack fails to build
+      if a component in it is not in the manifest for its architecture,
+      the manifest lists one the script does not know or gives a
+      built-in one another host, a version disagrees with the release's
+      versions.json, the manifest is for another release, a component
+      has no text and is not public domain (SQLite is), or a text does
+      not match its hash. THIRD-PARTY.md also says what our shim links:
+      the MSYS2 toolchain's mingw-w64 runtime, and libgcc (x86_64, with
+      the GCC exception's text) or compiler-rt (arm64).
+    - CHANGE: [2026-10-25] Every pack's THIRD-PARTY.md lists, under
+      "Where to get the source", the source archive of each GPL, LGPL and
+      MPL component in it, with its SHA-256 and the recipe that built it,
+      and the crates.io pages of the MPL-2.0 Rust crates in librsvg; a
+      pack whose copyleft component has no such archive fails to build.
+      This found that the recipe parser dropped every conda package's
+      SHA-256 (a regex consumed the line break before it); it is fixed.
+    - CHANGE: [2026-10-25] THIRD-PARTY.md, and the README, carry the
+      statements licences ask a binary distribution's documentation for:
+      FreeType's credit (with the bundled release's year), the IJG's for
+      libjpeg-turbo and mozjpeg, and Adobe's gain-map notice for
+      libultrahdr (Windows). Every pack carries the Unicode License v3
+      (LICENSES/Unicode-3.0.txt, vendored from unicode.org and SHA-256
+      pinned) for the Unicode data tables compiled into GLib, FriBidi
+      and HarfBuzz, whose upstreams ship no Unicode licence text.
+    - BUGFIX: [2026-10-25] A burst of first decodes on worker threads
+      could still crash on macOS, on a few cold launches in a hundred:
+      a segfault inside libffi, "Failure to set up FFI call interface",
+      or a memcpy marshalled from garbage argument types. memcpy was
+      bound with an empty library name, which MoarVM builds against
+      dlopen(NULL) but re-opens verbatim when NativeCall checks whether
+      the call site is built; macOS's dlopen("") fails, so the site
+      never read as built and was rebuilt in place on every dispatch
+      recording while other threads copied it half-written. memcpy now
+      binds by a complete library filename on every platform. t/08
+      checks that cause directly, and its cold launches now fail when
+      a child is killed by a signal: they used to pass segfaults,
+      because a signalled child reports exit code 0.
+    - BUGFIX: [2026-10-25] The Linux packs' libgomp.so.1 (LibRaw's
+      OpenMP runtime) is credited to libgomp, GPL-3.0 with the GCC
+      Runtime Library Exception, and ships with those texts. The notices
+      kit credited a bundled file to the package that installed its
+      path, and that path is a link _openmp_mutex (BSD-3-Clause)
+      installs; it now follows a link to the file it leads to, and
+      credits the package that installed that. The README names libgomp
+      with the rest of the GCC runtime.
+    - CHANGE: [2026-10-25] THIRD-PARTY.md calls out the weak-copyleft
+      licences (MPL, EPL, CDDL) beside the GPL and LGPL ones, and the
+      README names the MPL-2.0 code in the macOS and Linux packs: NSS and
+      NSPR (through poppler), the Public Suffix List built into libpsl,
+      and librsvg's MPL-2.0 Rust crates; and in the Windows packs:
+      librsvg's crates, and proxy-libintl (LGPL) and zstd and FreeType
+      (GPL or another licence). It called everything that was not (L)GPL
+      permissive.
+    - CHANGE: [2026-10-25] The macOS and Linux packs carry Lerc's NOTICE
+      (LICENSES/lerc/NOTICE), which its conda package lacks, kept byte
+      for byte from the Lerc 4.2.0 source archive the package was built
+      from (scripts/ci/license-texts/lerc-4.2.0/NOTICE, SHA-256 pinned).
+      A pack with another Lerc version, or without the NOTICE, fails to
+      build.
+    - CHANGE: [2026-10-25] The macOS and Linux packs carry the permission
+      notices of FreeType's BDF and PCF font drivers, which are compiled
+      into libfreetype under X11-style licences and which conda-forge's
+      freetype package lacks (it ships FTL.TXT and GPLv2.TXT only):
+      LICENSES/libfreetype6/src/bdf/README and src/pcf/README, whole and
+      byte for byte from the freetype-2.14.3 source archive the package
+      was built from (scripts/ci/license-texts/freetype-2.14.3/, SHA-256
+      pinned; the same files the Windows packs ship). A pack with another
+      FreeType version, one built from another source archive, or a kept
+      text missing or edited, fails to build; Lerc's NOTICE is checked
+      the same way.
+    - CHANGE: [2026-10-25] A prebuilt pack fails to build when a package
+      in it declares a copyleft licence (GPL, AGPL, GPL-or-other, GPL
+      with the GCC exception, LGPL, MPL, EPL, CDDL) that
+      scripts/ci/disclosed.json does not list for its platform, and when
+      a package in it has no licence text and does not declare a
+      public-domain dedication (SQLite's "blessing" is one). A package
+      without a text used to be flagged and shipped anyway.
+    - TEST: [2026-10-25] t/12-disclosure fails unless the README and its
+      Pod name, in each platform's disclosure item, every package
+      scripts/ci/disclosed.json lists for that platform, and the list
+      has one entry per prebuilt pack.
+    - TEST: [2026-10-25] t/09-strict-decode decodes its corrupt PNG in a
+      child process started with VIPS_WARNING=1, so a test run's stderr
+      stays empty: libvips printed two warnings for it ("Not enough
+      image data", "error in tile 0 x 0"). The variable has to be set
+      before the process starts -- libvips reads it once, in vips_init,
+      which runs as the module loads.
+    - TEST: [2026-10-25] xt/01-third-party-kit runs
+      scripts/ci/third-party.py against mock conda environments and a
+      mock build-win64-mxe release (both architectures), checks the kit
+      it writes, and each refusal: an undisclosed or textless package, a
+      copyleft package without a source SHA-256, a kept text (Lerc's
+      NOTICE, FreeType's driver notices) for another version, from
+      another source archive, missing or edited, an unknown FreeType
+      credit year, a librsvg without its crate list, and a manifest
+      that is missing a component, lists an unknown one, gives a built-in
+      one the wrong host, lists one for the other architecture only,
+      disagrees with versions.json, is for another release, or names a
+      text whose bytes do not match.
+    - CI: [2026-10-25] The Linux release lanes create their conda
+      environment with --override-channels, from conda-forge alone, as
+      the macOS lane does. The Windows release lanes list each packaged
+      archive with 7z and fail unless the whole notices kit is in it --
+      THIRD-PARTY.md, the GPL-3.0 text, a LICENSES/<component>/ for
+      every component with texts, every file the kit step wrote -- as
+      the macOS and Linux probe already checks. test.yml's comment says
+      what VIPS_WARNING does: it silences libvips's warnings.
+    - CHANGE: [2026-10-25] .gitattributes keeps the licence texts and
+      NOTICE files under scripts/ci/license-texts/ byte for byte (no
+      line-ending conversion), since each is checked against a SHA-256
+      of its upstream bytes, some of which have CRLF line endings.
+    - CHANGE: [2026-10-23] Raku code is indented with tabs: Build.rakumod,
+      lib/, bin/vips_smart_resize and the tests. Whitespace only.
+    - CHANGE: [2026-10-05] Prebuilt binaries move to
+      binaries-vips-8.18.7-r12 (libvips 8.18.7). The macOS arm64
+      prebuilt is now built from conda-forge's libvips instead of
+      Homebrew's bottle, whose 8.18.7 supports only the newest macOS: it
+      runs on macOS 11 and later (the r11 bundle needed macOS 14), with
+      the same codec set as Linux. x86_64 macOS -- an Intel Mac, or an
+      x86_64 Raku under Rosetta -- still has no prebuilt; its install now
+      says what to use instead (an x86_64 libvips, or VIPS_NATIVE_LIB_DIR).
+    - BUGFIX: [2026-10-05] The Linux prebuilts carry the HEIF/AVIF, JPEG
+      XL, PDF and OpenSlide loaders they were missing.
+      conda-forge builds those as separately loaded libvips modules, and
+      the r11 Linux bundles shipped none of them, so those formats failed
+      to open on Linux installs. r12 ships the modules, every library they
+      need -- including conda-forge's C++ runtime, which they require and
+      which is newer than Ubuntu 22.04's -- and the lookup that finds them:
+      VIPSHOME now points at the staged lib directory on macOS and Linux,
+      where both platforms' libvips builds find their modules.
+    - CHANGE: [2026-10-05] Every prebuilt pack carries a THIRD-PARTY.md
+      and a LICENSES/ directory, staged beside the libraries: each bundled
+      library mapped to the package it came from, with its version,
+      licence and source, and the licence texts themselves. The packs
+      contain GPL-licensed code (FFTW and poppler everywhere; x265 and LZO
+      on macOS and Linux) as well as LGPL-licensed code; the r11 macOS
+      pack's libimagequant 4.x (GPL-3.0) is in none of them. The README's
+      new "Binary distributions and licensing" section lists them per
+      platform, says where each pack comes from, and how to install with
+      no prebuilt at all (VIPS_NATIVE_PREFER_SYSTEM=1). Installation
+      refuses an archive without its notices, and empties the stage --
+      directories too -- before unpacking one.
+    - CHANGE: [2026-10-05] The strict in-memory decode shim symbol
+      (vips_shim_image_new_from_buffer_strict) and the Windows shim fixes
+      below ship in the r12 prebuilts, so strict decoding works from the
+      bundled shim on every platform, with no local compile.
+    - CHANGE: [2026-10-05] Prebuilt releases publish only from a pushed
+      binaries-vips-* tag equal to BINARY_TAG; a manual run of the release
+      workflow builds and probes every platform and publishes nothing.
+      Before release, each macOS and Linux pack is unpacked as an install
+      would unpack it and every loader must decode a real file, with
+      nothing loaded from outside the bundle.
+    - TEST: [2026-10-05] t/11-build-platform pins which prebuilt each
+      platform asks for (and that every asset Build can ask for is one the
+      release builds and resources/checksums.txt pins), what x86_64 macOS
+      is told instead, and that an unpacked archive is only accepted with
+      its libraries and its notices.
+    - BUGFIX: [2026-10-01] Windows installs compile the varargs shim when
+      the staged one is out of date. Build returned early on Windows, so
+      the shim only ever came from the prebuilt bundle, and a bundle cut
+      before the source gained a function (the r11 bundles lack
+      vips_shim_image_new_from_buffer_strict; r12 ships it) left strict
+      decoding dying with "Cannot locate symbol". It now compiles the way
+      build-binaries.yml's Windows job does -- a MinGW `cc` (or
+      VIPS_NATIVE_CC) linking straight against libvips-<N>.dll and
+      libglib-2.0-<N>.dll from the stage, VIPS_NATIVE_LIB_DIR or PATH --
+      to a temporary file, checks with `nm` that every vips_shim_* the
+      source defines is exported, and only then renames it into place,
+      writes the sidecar and parks a copy in the cache. Freshness there
+      comes from the .srchash sidecar alone: IO::Path.modified on
+      Windows puts every file within seconds of 1970 (a MoarVM overflow),
+      so the old mtime fallback compared noise. No compiler, no `nm`, a
+      failed link, a missing export, or a shim held open by a running
+      application each say so and leave the stage as it was.
+    - BUGFIX: [2026-10-01] the shim's .srchash sidecar is never mistaken
+      for the shim. The bundle-only lenient filename match accepted
+      libvips_shim.<ext>.srchash, so a stage holding the sidecar but not
+      the shim handed dlopen a text file.
+    - BUGFIX: [2026-10-01] VIPS_NATIVE_LIB_DIR is read one way by
+      everything. The runtime-env step skipped all its setup for any
+      non-empty value while the resolver ignored one that was not a
+      directory, so a mistyped override loaded the staged libvips with
+      none of its setup (on Windows, its DLLs not findable). Now an
+      override that is not a directory is ignored by both; one that
+      holds libvips also gets the Windows DLL-directory setup it cannot
+      load without (VIPSHOME and GIO stay the user's); and the shim is
+      looked for there first, as libvips is.
+    - BUGFIX: [2026-10-01] on Windows the download and shim cache lives
+      under %LOCALAPPDATA%. Windows sets no HOME, so the default came out
+      as ./.cache -- inside the directory zef ran the build from, the
+      dist's own source tree for a local `zef install .`.
+    - CHANGE: [2026-10-01] orphaned stages are removed in Raku rather
+      than with `rm -rf`, which a stock Windows lacks; a link inside a
+      stage is removed as a link, never followed.
+    - CHANGE: [2026-10-01] the Windows CI job writes
+      libvips_shim.dll.srchash, as the macOS and Linux jobs already do,
+      and checks every vips_shim_* the source defines is exported by
+      name, where it used to accept any one. The r12 prebuilts are the
+      first built this way; the macOS job runs the same check.
+    - TEST: [2026-10-01] t/10-build-shim pins the build's pure parts
+      (source functions, nm parsing, missing exports, DLL and toolchain
+      discovery, stage removal) and that every shim function FFI binds
+      is one the C source defines; t/06 adds the override and the shim
+      resolution, including a child process started with the override.
+    - CI: [2026-09-29] test.yml and glibc-fallback.yml run every lane on
+      Rakudo 2026.07 (the last release with the legacy frontend) and
+      2026.09 (RakuAST the default), where they ran on 'latest'.
+    - CHANGE: [2026-09-14] Add opt-in strict in-memory decode with a
+      fixed-arity native shim; reject loader warnings and corrupt lazy
+      pixel data without changing default decoding behavior.
+    - CHANGE: [2026-09-06] A .gitattributes keeps every text file LF, in
+      the repository and in every checkout whatever core.autocrlf says
+      (batch files reach the disk as CRLF), and never converts the
+      binary types (images, archives, libraries, fonts, PDFs).
+    - BUGFIX: [2026-09-06] On Windows the staged lib dir is now prepended
+      to the process's real `Path` entry. The runtime-env step wrote
+      `%*ENV<PATH>`, but the entry a Windows process is handed is
+      spelled `Path`, and Raku's %*ENV is a case-sensitive Hash — so
+      the real search path was never touched and a second `PATH` key
+      appeared holding only the staged dir. A child process spawned
+      afterwards inherited both, and Windows could hand it the short
+      one as its whole DLL search path: a consumer app's child-process
+      tests failed with `sqlcipher.dll not found` for exactly that
+      reason. The key is now found case-insensitively, and t/06 pins
+      that loading the module leaves one PATH entry, with the staged
+      dir at its head on Windows.
+    - BUGFIX: [2026-09-05] `native-copy-of` no longer underflows the
+      heap for an empty Blob. It sized its CArray with
+      `CArray[uint8].allocate($n)` for every $n, and Rakudo implements
+      `allocate` as a bind to index $n - 1 — so a zero-byte input
+      bound index -1 and wrote one byte before the freshly allocated
+      storage. Nothing was observable at the callsite on macOS or
+      Linux; on Windows the heap checker caught the corrupted
+      neighbour at some later, unrelated free and aborted the process
+      with STATUS_HEAP_CORRUPTION (0xC0000374), which surfaced as
+      t/07-bulk-copy dying mid-run and `zef install` refusing the
+      dist. Empty inputs now get `CArray[uint8].new` (a valid
+      zero-element array, non-NULL pointer, no bind). The test's own
+      reference writer had the same bug and is fixed the same way; a
+      regression test churns the allocator after empty copies so a
+      repeat is caught in this file rather than downstream.
+    - BUGFIX: [2026-08-27] the library-path resolvers are no longer
+      racy on first touch. Each memoised its lookup in a bare
+      `state $r = <probe>`, and a `state` initialiser is not atomic —
+      the slot is flagged initialised independently of the value
+      landing in it, so a thread arriving mid-initialisation read
+      `Any`. The probes are nested directory walks taking
+      milliseconds on a cold page cache, which is exactly how long a
+      burst of worker threads decoding their first images at app
+      startup needs to collide: 16 of 25 cold launches failed at 64
+      threads before the fix, 0 of 60 after. Symptoms were a
+      "expected Bool but got Any" type-check failure out of the shim
+      predicate, or a `Str` type object handed to dlopen as a library
+      name — in a consumer that wraps decodes in `try`, an image that
+      silently never appears. Resolution now happens under a lock,
+      and every resolver is primed once from the module mainline on
+      the loading thread, so the concurrent first touch cannot arise
+      in the first place. New regression test (t/08-cold-start-race)
+      drives 64 real OS threads through a cold decode burst across
+      ten child processes.
+    - Pixel buffers now cross between libvips's heap and Raku in a
+      single memcpy instead of a per-byte Raku loop, so a 4000×3000
+      decode-to-rgba copies its 48 MB in ~5 ms rather than ~11.7 s
+      (letterbox-to-buffer, smart-resize-buffer and the encoded-input
+      side get the same treatment). New Vips::Native::FFI helpers
+      buf-from-native / native-copy-of; memcpy resolves out of
+      libSystem on macOS, glibc's libc.so.6 on Linux and ucrtbase.dll
+      on Windows (see the 2026-10-25 entry). Blobs whose elements
+      are wider than a byte are now rejected at the boundary rather
+      than silently truncated.
+
 0.6.4  2026-08-21T21:24:59+01:00
     - [2026-08-12] vips_init is now deterministic: exactly once, at
       module load, on the loading thread, via a lock-guarded
