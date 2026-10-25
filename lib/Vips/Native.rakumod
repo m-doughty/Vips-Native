@@ -6,10 +6,12 @@ use NativeCall;
 # --- init discipline ------------------------------------------------------
 #
 # vips_init is NOT safe to run lazily on a worker thread. Since the
-# bundle grew vips-modules (r11: heif/jxl/magick/openslide/poppler),
+# bundles grew vips-modules (heif/jxl/openslide/poppler, and magick on
+# Windows and in r11's macOS bundle: macOS from r11, Linux from r12),
 # vips_init runs vips_load_plugins, which dlopens each module — and a
-# dlopen storm on a worker thread can deadlock against ANY other
-# thread's dlopen (observed 2026-08-11 in a consumer app, sampled live:
+# dlopen storm on a worker thread can
+# deadlock against ANY other thread's dlopen (observed 2026-08-11 in a
+# consumer app, sampled live:
 # worker holds dyld's API lock inside vips_init → g_module_open →
 # dlopen → plugin initializers → libintl rwlock, while the main
 # thread's own unrelated dlopen waits on dyld's lock and every other
@@ -38,17 +40,17 @@ my Bool $vips-initialised = False;
     point. The C<$progname> only labels vips's error contexts, so
     whichever caller gets there first wins it. )
 sub ensure-vips-init(Str $progname = 'raku-vips') is export {
-    ($vips-init-lock //= Lock.new).protect: {
-        unless $vips-initialised {
-            vips_init($progname);
-            $vips-initialised = True;
-        }
-    }
+	($vips-init-lock //= Lock.new).protect: {
+		unless $vips-initialised {
+			vips_init($progname);
+			$vips-initialised = True;
+		}
+	}
 }
 
 INIT {
-    $vips-init-lock //= Lock.new;
-    ensure-vips-init();
+	$vips-init-lock //= Lock.new;
+	ensure-vips-init();
 }
 
 #|( Smart-crop + resize an image to fixed output dimensions, saving
@@ -156,109 +158,112 @@ sub smart-resize(
     prebuilt bundle.
     )
 sub letterbox-to-buffer(
-    IO::Path() $path,
-    UInt :$size = 448,
-    :@bg = (255, 255, 255),
-    --> Buf[uint8]
+	IO::Path() $path,
+	UInt :$size = 448,
+	:@bg = (255, 255, 255),
+	--> Buf[uint8]
 ) is export {
-    fail "No file found at $path" unless $path.e && $path.r;
-    fail "Background must be 3 RGB doubles, got @bg.elems()"
-        unless @bg.elems == 3;
+	fail "No file found at $path" unless $path.e && $path.r;
+	fail "Background must be 3 RGB doubles, got @bg.elems()"
+		unless @bg.elems == 3;
 
-    ensure-vips-init("vips-letterbox");
+	ensure-vips-init("vips-letterbox");
 
-    my VipsImage $loaded = vips_image_new_from_file($path.Str, Str);
-    fail "Could not load image: $path" unless $loaded.defined;
-    LEAVE { g_object_unref($loaded) with $loaded }
+	my VipsImage $loaded = vips_image_new_from_file($path.Str, Str);
+	fail "Could not load image: $path" unless $loaded.defined;
+	LEAVE { g_object_unref($loaded) with $loaded }
 
-    # 1. Flatten alpha onto $bg, but only if the source actually has
-    # an alpha channel. libvips's flatten errors (rc=-1) on 3-band
-    # RGB inputs rather than treating it as a no-op, so we probe the
-    # band count first. 4-band → RGBA → flatten to 3-band RGB.
-    # 3-band RGB → use directly. Other counts (greyscale, CMYK,
-    # multi-spectral) are out of scope for v1 — fail with details
-    # rather than silently mis-encoding.
-    my $loaded-bands = vips_image_get_bands($loaded);
-    my VipsImage $rgb;
-    my $flattened-handle;
-    my Int $rc;
-    if $loaded-bands == 4 {
-        my $flattened = CArray[VipsImage].new;
-        $flattened[0] = VipsImage;
-        $rc = vips_flatten($loaded, $flattened,
-            @bg[0].Num, @bg[1].Num, @bg[2].Num);
-        fail "vips_flatten failed (rc=$rc)" if $rc != 0;
-        $rgb = $flattened[0];
-        $flattened-handle = $rgb;
-    } elsif $loaded-bands == 3 {
-        $rgb = $loaded;
-    } else {
-        fail "Unsupported band count $loaded-bands (expected 3 RGB or 4 RGBA)";
-    }
-    LEAVE { g_object_unref($flattened-handle) with $flattened-handle }
+	# 1. Flatten alpha onto $bg, but only if the source actually has
+	# an alpha channel. libvips's flatten errors (rc=-1) on 3-band
+	# RGB inputs rather than treating it as a no-op, so we probe the
+	# band count first. 4-band → RGBA → flatten to 3-band RGB.
+	# 3-band RGB → use directly. Other counts (greyscale, CMYK,
+	# multi-spectral) are out of scope for v1 — fail with details
+	# rather than silently mis-encoding.
+	my $loaded-bands = vips_image_get_bands($loaded);
+	my VipsImage $rgb;
+	my $flattened-handle;
+	my Int $rc;
+	if $loaded-bands == 4 {
+		my $flattened = CArray[VipsImage].new;
+		$flattened[0] = VipsImage;
+		$rc = vips_flatten($loaded, $flattened,
+			@bg[0].Num, @bg[1].Num, @bg[2].Num);
+		fail "vips_flatten failed (rc=$rc)" if $rc != 0;
+		$rgb = $flattened[0];
+		$flattened-handle = $rgb;
+	} elsif $loaded-bands == 3 {
+		$rgb = $loaded;
+	} else {
+		fail "Unsupported band count $loaded-bands (expected 3 RGB or 4 RGBA)";
+	}
+	LEAVE { g_object_unref($flattened-handle) with $flattened-handle }
 
-    # Reject non-UCHAR formats. Some HDR / EXR / 16-bit PNG sources
-    # land here as USHORT or FLOAT; we can't safely write those as
-    # 8-bit without an explicit cast step (out of scope for v1).
-    my $format = vips_image_get_format($rgb);
-    fail "Expected 8-bit UCHAR pixels, got format-id $format"
-        unless $format == VIPS_FORMAT_UCHAR;
+	# Reject non-UCHAR formats. Some HDR / EXR / 16-bit PNG sources
+	# land here as USHORT or FLOAT; we can't safely write those as
+	# 8-bit without an explicit cast step (out of scope for v1).
+	my $format = vips_image_get_format($rgb);
+	fail "Expected 8-bit UCHAR pixels, got format-id $format"
+		unless $format == VIPS_FORMAT_UCHAR;
 
-    # 2. Resize so the longer side fits within $size.
-    my $w = vips_image_get_width($rgb);
-    my $h = vips_image_get_height($rgb);
-    my Num $scale = ($size / max($w, $h)).Num;
+	# 2. Resize so the longer side fits within $size.
+	my $w = vips_image_get_width($rgb);
+	my $h = vips_image_get_height($rgb);
+	my Num $scale = ($size / max($w, $h)).Num;
 
-    my $resized = CArray[VipsImage].new;
-    $resized[0] = VipsImage;
-    $rc = vips_resize($rgb, $resized, $scale, "kernel", VIPS_KERNEL_LANCZOS3, Str);
-    fail "vips_resize failed (rc=$rc)" if $rc != 0;
-    my VipsImage $small = $resized[0];
-    LEAVE { g_object_unref($small) with $small }
+	my $resized = CArray[VipsImage].new;
+	$resized[0] = VipsImage;
+	$rc = vips_resize($rgb, $resized, $scale, "kernel", VIPS_KERNEL_LANCZOS3, Str);
+	fail "vips_resize failed (rc=$rc)" if $rc != 0;
+	my VipsImage $small = $resized[0];
+	LEAVE { g_object_unref($small) with $small }
 
-    my $small-w = vips_image_get_width($small);
-    my $small-h = vips_image_get_height($small);
+	my $small-w = vips_image_get_width($small);
+	my $small-h = vips_image_get_height($small);
 
-    # 3. Embed in $size × $size canvas with $bg fill, image centred.
-    my Int $off-x = (($size - $small-w) / 2).floor;
-    my Int $off-y = (($size - $small-h) / 2).floor;
+	# 3. Embed in $size × $size canvas with $bg fill, image centred.
+	my Int $off-x = (($size - $small-w) / 2).floor;
+	my Int $off-y = (($size - $small-h) / 2).floor;
 
-    my $embedded = CArray[VipsImage].new;
-    $embedded[0] = VipsImage;
-    $rc = vips_embed($small, $embedded,
-        $off-x, $off-y, $size.Int, $size.Int,
-        VIPS_EXTEND_BACKGROUND,
-        @bg[0].Num, @bg[1].Num, @bg[2].Num);
-    fail "vips_embed failed (rc=$rc)" if $rc != 0;
-    my VipsImage $canvas = $embedded[0];
-    LEAVE { g_object_unref($canvas) with $canvas }
+	my $embedded = CArray[VipsImage].new;
+	$embedded[0] = VipsImage;
+	$rc = vips_embed($small, $embedded,
+		$off-x, $off-y, $size.Int, $size.Int,
+		VIPS_EXTEND_BACKGROUND,
+		@bg[0].Num, @bg[1].Num, @bg[2].Num);
+	fail "vips_embed failed (rc=$rc)" if $rc != 0;
+	my VipsImage $canvas = $embedded[0];
+	LEAVE { g_object_unref($canvas) with $canvas }
 
-    # 4. Write raw bytes. vips_image_write_to_memory g_malloc's a
-    # buffer of width*height*bands*sizeof(elem); for our UCHAR/3-band
-    # canvas that's exactly size*size*3 bytes.
-    my $size-out = CArray[uint64].new;
-    $size-out[0] = 0;
-    my $ptr = vips_image_write_to_memory($canvas, $size-out);
-    fail "vips_image_write_to_memory returned NULL" without $ptr;
+	# 4. Write raw bytes. vips_image_write_to_memory g_malloc's a
+	# buffer of width*height*bands*sizeof(elem); for our UCHAR/3-band
+	# canvas that's exactly size*size*3 bytes.
+	my $size-out = CArray[uint64].new;
+	$size-out[0] = 0;
+	my $ptr = vips_image_write_to_memory($canvas, $size-out);
+	fail "vips_image_write_to_memory returned NULL" without $ptr;
 
-    my $expected = $size * $size * 3;
-    my $got      = $size-out[0].Int;
-    if $got != $expected {
-        vips_shim_free($ptr);
-        fail "vips_image_write_to_memory returned $got bytes, expected $expected";
-    }
+	my $expected = $size * $size * 3;
+	my $got      = $size-out[0].Int;
+	if $got != $expected {
+		vips_shim_free($ptr);
+		fail "vips_image_write_to_memory returned $got bytes, expected $expected";
+	}
 
-    # Copy out into a Raku-owned Buf so we can free the GLib buffer
-    # immediately — no lifetime entanglement between the caller and
-    # libvips/glib's heap. nativecast(CArray[uint8], $ptr) gives us
-    # an indexable view; we walk it byte-by-byte into the Buf.
-    my $bytes = nativecast(CArray[uint8], $ptr);
-    my $out = buf8.allocate($expected);
-    $out[$_] = $bytes[$_] for ^$expected;
+	# Copy out into a Raku-owned Buf so we can free the GLib buffer
+	# immediately — no lifetime entanglement between the caller and
+	# libvips/glib's heap. One memcpy (see buf-from-native), not a
+	# Raku-level byte walk: even at the default 448 this is 602 KB,
+	# and the loop it replaces cost more than the resize did.
+	#
+	# The copy has fully completed by the time buf-from-native
+	# returns, so freeing the source on the next line is safe — and
+	# $ptr must not be read again after it.
+	my $out = buf-from-native($ptr, $expected);
 
-    vips_shim_free($ptr);
+	vips_shim_free($ptr);
 
-    $out;
+	$out;
 }
 
 #|( A decoded, tightly-packed 4-band RGBA pixel buffer plus its pixel
@@ -270,9 +275,9 @@ sub letterbox-to-buffer(
     touches disk: the bytes live only in this Buf, so an encrypted source
     blob can be rendered without spilling plaintext to a temp file. )
 class RawRgba is export {
-    has UInt     $.width;
-    has UInt     $.height;
-    has Buf[uint8] $.rgba;
+	has UInt     $.width;
+	has UInt     $.height;
+	has Buf[uint8] $.rgba;
 }
 
 # Shared tail of decode-to-rgba: normalise a loaded VipsImage to 8-bit
@@ -281,61 +286,68 @@ class RawRgba is export {
 # path, must keep the encoded source buffer alive across this call,
 # because libvips decodes lazily right down to vips_image_write_to_memory.
 sub _rgba-from-vips(VipsImage $loaded --> RawRgba) {
-    # 1. Normalise colourspace → 8-bit sRGB. One step handles greyscale,
-    # CMYK, 16-bit, palette, etc.; an existing alpha band passes through.
-    my $cs = CArray[VipsImage].new;
-    $cs[0] = VipsImage;
-    my Int $rc = vips_colourspace($loaded, $cs, VIPS_INTERPRETATION_sRGB);
-    fail "vips_colourspace failed (rc=$rc)" if $rc != 0;
-    my VipsImage $srgb = $cs[0];
-    LEAVE { g_object_unref($srgb) with $srgb }
+	# 1. Normalise colourspace → 8-bit sRGB. One step handles greyscale,
+	# CMYK, 16-bit, palette, etc.; an existing alpha band passes through.
+	my $cs = CArray[VipsImage].new;
+	$cs[0] = VipsImage;
+	my Int $rc = vips_colourspace($loaded, $cs, VIPS_INTERPRETATION_sRGB);
+	fail "vips_colourspace failed (rc=$rc)" if $rc != 0;
+	my VipsImage $srgb = $cs[0];
+	LEAVE { g_object_unref($srgb) with $srgb }
 
-    # 2. Force 4-band RGBA. sRGB output is 3-band (opaque source) or
-    # 4-band (alpha carried through); add an opaque alpha only when absent
-    # — vips_addalpha raises if the image already has one.
-    my VipsImage $rgba-img;
-    my $added-handle;
-    if vips_image_get_bands($srgb) < 4 {
-        my $aa = CArray[VipsImage].new;
-        $aa[0] = VipsImage;
-        $rc = vips_addalpha($srgb, $aa);
-        fail "vips_addalpha failed (rc=$rc)" if $rc != 0;
-        $rgba-img      = $aa[0];
-        $added-handle  = $rgba-img;
-    } else {
-        $rgba-img = $srgb;
-    }
-    LEAVE { g_object_unref($added-handle) with $added-handle }
+	# 2. Force 4-band RGBA. sRGB output is 3-band (opaque source) or
+	# 4-band (alpha carried through); add an opaque alpha only when absent
+	# — vips_addalpha raises if the image already has one.
+	my VipsImage $rgba-img;
+	my $added-handle;
+	if vips_image_get_bands($srgb) < 4 {
+		my $aa = CArray[VipsImage].new;
+		$aa[0] = VipsImage;
+		$rc = vips_addalpha($srgb, $aa);
+		fail "vips_addalpha failed (rc=$rc)" if $rc != 0;
+		$rgba-img      = $aa[0];
+		$added-handle  = $rgba-img;
+	} else {
+		$rgba-img = $srgb;
+	}
+	LEAVE { g_object_unref($added-handle) with $added-handle }
 
-    # 3. colourspace(sRGB) yields UCHAR; assert before trusting the byte
-    # count so a surprise format fails loudly instead of mis-rendering.
-    my $format = vips_image_get_format($rgba-img);
-    fail "Expected 8-bit UCHAR pixels after sRGB convert, got format-id $format"
-        unless $format == VIPS_FORMAT_UCHAR;
+	# 3. colourspace(sRGB) yields UCHAR; assert before trusting the byte
+	# count so a surprise format fails loudly instead of mis-rendering.
+	my $format = vips_image_get_format($rgba-img);
+	fail "Expected 8-bit UCHAR pixels after sRGB convert, got format-id $format"
+		unless $format == VIPS_FORMAT_UCHAR;
 
-    my $w = vips_image_get_width($rgba-img);
-    my $h = vips_image_get_height($rgba-img);
+	my $w = vips_image_get_width($rgba-img);
+	my $h = vips_image_get_height($rgba-img);
 
-    # 4. Materialise. g_malloc'd buffer of exactly w*h*4 bytes (RGBA UCHAR).
-    my $size-out = CArray[uint64].new;
-    $size-out[0] = 0;
-    my $ptr = vips_image_write_to_memory($rgba-img, $size-out);
-    fail "vips_image_write_to_memory returned NULL" without $ptr;
+	# 4. Materialise. g_malloc'd buffer of exactly w*h*4 bytes (RGBA UCHAR).
+	my $size-out = CArray[uint64].new;
+	$size-out[0] = 0;
+	my $ptr = vips_image_write_to_memory($rgba-img, $size-out);
+	fail "vips_image_write_to_memory returned NULL" without $ptr;
 
-    my $expected = $w * $h * 4;
-    my $got      = $size-out[0].Int;
-    if $got != $expected {
-        vips_shim_free($ptr);
-        fail "vips_image_write_to_memory returned $got bytes, "
-            ~ "expected $expected (w=$w h=$h, 4-band RGBA)";
-    }
+	my $expected = $w * $h * 4;
+	my $got      = $size-out[0].Int;
+	if $got != $expected {
+		vips_shim_free($ptr);
+		fail "vips_image_write_to_memory returned $got bytes, "
+			~ "expected $expected (w=$w h=$h, 4-band RGBA)";
+	}
 
-    my $bytes = nativecast(CArray[uint8], $ptr);
-    my $out   = buf8.allocate($expected);
-    $out[$_] = $bytes[$_] for ^$expected;
-    vips_shim_free($ptr);
+	# 5. Single memcpy out of libvips's g_malloc'd buffer into a
+	# GC-owned Buf, then release the source. This is the hot path for
+	# every consumer that displays an image: w*h*4 is 48 MB for a
+	# 4000×3000 source, which as a Raku-level per-byte walk was 48
+	# million iterations and dwarfed the decode itself.
+	#
+	# Ordering is load-bearing: buf-from-native does not return until
+	# the copy is done, so the free below can never race it, and $ptr
+	# is dead from that line onwards.
+	my $out = buf-from-native($ptr, $expected);
+	vips_shim_free($ptr);
 
-    RawRgba.new(:width($w.UInt), :height($h.UInt), :rgba($out));
+	RawRgba.new(:width($w.UInt), :height($h.UInt), :rgba($out));
 }
 
 #|( Decode an encoded image to raw RGBA pixels in memory, preserving
@@ -363,50 +375,62 @@ sub _rgba-from-vips(VipsImage $loaded --> RawRgba) {
     sRGB (greyscale, CMYK, 16-bit and palette sources are converted) and
     the result is always 4-band RGBA, so C<rgba.bytes == width*height*4>.
 
+    The Blob form accepts C<:strict> to fail on loader warnings, including
+    truncated pixel data encountered during lazy materialisation. It requires
+    the current native shim. The default keeps the loader's normal tolerance.
+
     Failures:
     =item Empty buffer / missing file → C<fail>s with details.
+    =item A C<Blob> whose elements are wider than a byte (C<Blob[uint32]>
+      and friends) → C<fail>s. Encoded image data is bytes; anything else
+      is a caller mistake, and saying so beats decoding nonsense.
     =item Undecodable / corrupt bytes → C<fail>s.
     =item Non-UCHAR result after convert → C<fail>s rather than mis-render.
 
     Lifetime note (Blob form): C<vips_image_new_from_buffer> does not copy
     its input, so the encoded bytes are copied into a native buffer rooted
-    for the duration of the decode. The returned C<RawRgba.rgba> is fully
-    GC-owned with no tie to libvips's heap.
+    for the duration of the decode. Both that copy and the copy of the
+    decoded pixels back out of libvips's heap are single C<memcpy>s, so a
+    multi-megapixel decode is not paying for a per-byte Raku loop. The
+    returned C<RawRgba.rgba> is fully GC-owned with no tie to libvips's
+    heap.
 
     Platforms: macOS arm64, Linux x86_64 + aarch64 (glibc), Windows
     x86_64 + arm64. The shim ships in every prebuilt bundle. )
-multi decode-to-rgba(Blob:D $encoded --> RawRgba) is export {
-    fail "Empty image buffer" unless $encoded.elems > 0;
-    ensure-vips-init("vips-decode-rgba");
+multi decode-to-rgba(Blob:D $encoded, Bool:D :$strict = False --> RawRgba) is export {
+	fail "Empty image buffer" unless $encoded.elems > 0;
+	fail "Expected a blob of bytes, got {$encoded.^name} "
+		~ "({$encoded.elems} elements, {$encoded.bytes} bytes)"
+		unless $encoded.bytes == $encoded.elems;
+	ensure-vips-init("vips-decode-rgba");
 
-    # Copy the encoded bytes into a native CArray we control. libvips
-    # references this buffer lazily (it is NOT copied by
-    # vips_image_new_from_buffer) and reads it as late as
-    # vips_image_write_to_memory inside _rgba-from-vips, so it must stay
-    # alive across the whole pipeline. Root it via LEAVE — registered
-    # FIRST so it runs LAST, after the $loaded unref below.
-    my $enc-ca = CArray[uint8].allocate($encoded.elems);
-    $enc-ca[$_] = $encoded[$_] for ^$encoded.elems;
-    LEAVE { $enc-ca.so }
+	# Copy the encoded bytes into a native CArray we control. libvips
+	# references this buffer lazily (it is NOT copied by
+	# vips_image_new_from_buffer) and reads it as late as
+	# vips_image_write_to_memory inside _rgba-from-vips, so it must stay
+	# alive across the whole pipeline. Root it via LEAVE — registered
+	# FIRST so it runs LAST, after the $loaded unref below.
+	my $enc-ca = native-copy-of($encoded);
+	LEAVE { $enc-ca.so }
 
-    my VipsImage $loaded =
-        vips_image_new_from_buffer(nativecast(Pointer, $enc-ca), $encoded.elems);
-    fail "Could not decode image buffer (unknown / corrupt format)"
-        unless $loaded.defined;
-    LEAVE { g_object_unref($loaded) with $loaded }
+	my VipsImage $loaded =
+		vips_image_new_from_buffer(nativecast(Pointer, $enc-ca), $encoded.bytes, :$strict);
+	fail "Could not decode image buffer (unknown / corrupt format)"
+		unless $loaded.defined;
+	LEAVE { g_object_unref($loaded) with $loaded }
 
-    _rgba-from-vips($loaded);
+	_rgba-from-vips($loaded);
 }
 
 multi decode-to-rgba(IO::Path:D $path --> RawRgba) is export {
-    fail "No file found at $path" unless $path.e && $path.r;
-    ensure-vips-init("vips-decode-rgba");
+	fail "No file found at $path" unless $path.e && $path.r;
+	ensure-vips-init("vips-decode-rgba");
 
-    my VipsImage $loaded = vips_image_new_from_file($path.Str, Str);
-    fail "Could not load image: $path" unless $loaded.defined;
-    LEAVE { g_object_unref($loaded) with $loaded }
+	my VipsImage $loaded = vips_image_new_from_file($path.Str, Str);
+	fail "Could not load image: $path" unless $loaded.defined;
+	LEAVE { g_object_unref($loaded) with $loaded }
 
-    _rgba-from-vips($loaded);
+	_rgba-from-vips($loaded);
 }
 
 #|( Smart-crop + resize an encoded image held in memory to fixed output
@@ -426,71 +450,75 @@ multi decode-to-rgba(IO::Path:D $path --> RawRgba) is export {
     without spilling either the source or the result to disk. Decode the
     returned PNG with C<decode-to-rgba> when it's time to display.
 
-    Failures: empty input, non-positive dimensions, undecodable bytes, or
-    any libvips error → C<fail>s with details. )
+    Failures: empty input, a C<Blob> with elements wider than a byte,
+    non-positive dimensions, undecodable bytes, or any libvips error →
+    C<fail>s with details. )
 sub smart-resize-buffer(
-    Blob:D $in, UInt $out-width, UInt $out-height --> Buf[uint8]
+	Blob:D $in, UInt $out-width, UInt $out-height --> Buf[uint8]
 ) is export {
-    fail "Empty input buffer" unless $in.elems > 0;
-    fail "Output dimensions must be positive"
-        unless $out-width > 0 && $out-height > 0;
-    ensure-vips-init("vips-smart-resize-buffer");
+	fail "Empty input buffer" unless $in.elems > 0;
+	fail "Expected a blob of bytes, got {$in.^name} "
+		~ "({$in.elems} elements, {$in.bytes} bytes)"
+		unless $in.bytes == $in.elems;
+	fail "Output dimensions must be positive"
+		unless $out-width > 0 && $out-height > 0;
+	ensure-vips-init("vips-smart-resize-buffer");
 
-    # Same lazy-buffer lifetime contract as decode-to-rgba — root the
-    # encoded CArray across the pipeline (pngsave_buffer forces the read).
-    my $enc-ca = CArray[uint8].allocate($in.elems);
-    $enc-ca[$_] = $in[$_] for ^$in.elems;
-    LEAVE { $enc-ca.so }
+	# Same lazy-buffer lifetime contract as decode-to-rgba — root the
+	# encoded CArray across the pipeline (pngsave_buffer forces the read).
+	my $enc-ca = native-copy-of($in);
+	LEAVE { $enc-ca.so }
 
-    my VipsImage $input =
-        vips_image_new_from_buffer(nativecast(Pointer, $enc-ca), $in.elems);
-    fail "Could not decode image buffer (unknown / corrupt format)"
-        unless $input.defined;
-    LEAVE { g_object_unref($input) with $input }
+	my VipsImage $input =
+		vips_image_new_from_buffer(nativecast(Pointer, $enc-ca), $in.bytes);
+	fail "Could not decode image buffer (unknown / corrupt format)"
+		unless $input.defined;
+	LEAVE { g_object_unref($input) with $input }
 
-    my $in-width  = vips_image_get_width($input);
-    my $in-height = vips_image_get_height($input);
-    my $in-ratio  = $in-width / $in-height;
-    my $out-ratio = $out-width / $out-height;
+	my $in-width  = vips_image_get_width($input);
+	my $in-height = vips_image_get_height($input);
+	my $in-ratio  = $in-width / $in-height;
+	my $out-ratio = $out-width / $out-height;
 
-    my ($crop-width, $crop-height) = $in-ratio > $out-ratio
-        ?? ($in-height * $out-ratio, $in-height)
-        !! ($in-width, $in-width / $out-ratio);
-    $crop-width  = $crop-width.Int;
-    $crop-height = $crop-height.Int;
+	my ($crop-width, $crop-height) = $in-ratio > $out-ratio
+		?? ($in-height * $out-ratio, $in-height)
+		!! ($in-width, $in-width / $out-ratio);
+	$crop-width  = $crop-width.Int;
+	$crop-height = $crop-height.Int;
 
-    my $cropped = CArray[VipsImage].new;
-    $cropped[0] = VipsImage;
-    my Int $rc = vips_smartcrop($input, $cropped, $crop-width, $crop-height,
-        "interesting", VIPS_INTERESTING_ATTENTION, Str);
-    fail "vips_smartcrop failed (rc=$rc)" if $rc != 0;
-    my VipsImage $crop = $cropped[0];
-    LEAVE { g_object_unref($crop) with $crop }
+	my $cropped = CArray[VipsImage].new;
+	$cropped[0] = VipsImage;
+	my Int $rc = vips_smartcrop($input, $cropped, $crop-width, $crop-height,
+		"interesting", VIPS_INTERESTING_ATTENTION, Str);
+	fail "vips_smartcrop failed (rc=$rc)" if $rc != 0;
+	my VipsImage $crop = $cropped[0];
+	LEAVE { g_object_unref($crop) with $crop }
 
-    my $resized = CArray[VipsImage].new;
-    $resized[0] = VipsImage;
-    $rc = vips_resize($crop, $resized,
-        ($out-width / $crop-width).Num,
-        "kernel", VIPS_KERNEL_LANCZOS3, Str);
-    fail "vips_resize failed (rc=$rc)" if $rc != 0;
-    my VipsImage $small = $resized[0];
-    LEAVE { g_object_unref($small) with $small }
+	my $resized = CArray[VipsImage].new;
+	$resized[0] = VipsImage;
+	$rc = vips_resize($crop, $resized,
+		($out-width / $crop-width).Num,
+		"kernel", VIPS_KERNEL_LANCZOS3, Str);
+	fail "vips_resize failed (rc=$rc)" if $rc != 0;
+	my VipsImage $small = $resized[0];
+	LEAVE { g_object_unref($small) with $small }
 
-    # Encode to PNG in memory. $buf-out[0] becomes a g_malloc'd Pointer.
-    my $buf-out = CArray[Pointer].new;
-    $buf-out[0] = Pointer;
-    my $len-out = CArray[uint64].new;
-    $len-out[0] = 0;
-    $rc = vips_pngsave_buffer($small, $buf-out, $len-out);
-    fail "vips_pngsave_buffer failed (rc=$rc)" if $rc != 0;
-    my $ptr = $buf-out[0];
-    fail "vips_pngsave_buffer returned NULL" without $ptr;
+	# Encode to PNG in memory. $buf-out[0] becomes a g_malloc'd Pointer.
+	my $buf-out = CArray[Pointer].new;
+	$buf-out[0] = Pointer;
+	my $len-out = CArray[uint64].new;
+	$len-out[0] = 0;
+	$rc = vips_pngsave_buffer($small, $buf-out, $len-out);
+	fail "vips_pngsave_buffer failed (rc=$rc)" if $rc != 0;
+	my $ptr = $buf-out[0];
+	fail "vips_pngsave_buffer returned NULL" without $ptr;
 
-    my $n     = $len-out[0].Int;
-    my $bytes = nativecast(CArray[uint8], $ptr);
-    my $out   = buf8.allocate($n);
-    $out[$_] = $bytes[$_] for ^$n;
-    vips_shim_free($ptr);
+	# One memcpy out of the g_malloc'd PNG buffer, then free it — the
+	# copy is complete before buf-from-native returns, and $ptr is
+	# dead afterwards.
+	my $n   = $len-out[0].Int;
+	my $out = buf-from-native($ptr, $n);
+	vips_shim_free($ptr);
 
-    $out;
+	$out;
 }

@@ -3,21 +3,45 @@ name: build-binaries
 # Repackages upstream-prebuilt libvips into self-contained per-
 # platform archives that Vips-Native's Build.rakumod can download
 # at install time. We do NOT compile vips ourselves — the upstream
-# sources (Homebrew, conda-forge, libvips/build-win64-mxe) are all
-# reputable and well-tested, and rebuilding vips's huge dep tree
-# from source in CI would be a maintenance nightmare.
+# sources (conda-forge for macOS and Linux, libvips/build-win64-mxe
+# for Windows) are reputable and well-tested, and rebuilding vips's
+# huge dep tree from source in CI would be a maintenance nightmare.
 #
 # Per platform:
 #   1. Download libvips + transitive deps from the upstream source.
-#   2. Cherry-pick the .dylib/.so/.dll files we need; drop CLI
-#      binaries, headers, locales, docs, .a archives.
+#   2. Cherry-pick the .dylib/.so/.dll files we need — libvips, its
+#      dlopen'd loader modules (vips-modules-<M>.<m>/) and everything
+#      either links; drop CLI binaries, headers, locales, docs, .a
+#      archives. The macOS and Linux packs leave out conda-forge's
+#      ImageMagick module, and everything only it links (Graphviz,
+#      EPL-1.0, beside the packs' GPL code); Windows keeps ImageMagick.
 #   3. Relocate inter-lib refs to @loader_path / $ORIGIN / sibling
 #      DLLs so the bundle is self-contained and movable.
-#   4. Repackage as vips-<platform>.{tar.gz,zip}.
-#   5. Publish to GitHub Releases under the BINARY_TAG.
+#   4. Write the notices kit — THIRD-PARTY.md (every bundled file ->
+#      the package or component it came from, its version, licence and
+#      source) and LICENSES/ (the licence texts) — beside the libraries;
+#      fail on any library it cannot attribute, on a package left
+#      without its licence text, and on copyleft the README does not
+#      disclose (scripts/ci/third-party.py, scripts/ci/disclosed.json).
+#      Repackage as vips-<platform>.{tar.gz,zip}.
+#   5. macOS + Linux: stage the packaged archive the way Build.rakumod
+#      does and run the loader probe (scripts/ci/probe-bundle.sh) —
+#      every loader, the module ones included, must decode a real
+#      file, with nothing loaded from outside the bundle. Windows: list
+#      the packaged archive and fail unless the whole notices kit is in
+#      it.
+#   6. Publish to GitHub Releases under the BINARY_TAG.
 #
-# Trigger: workflow_dispatch (manual) with a libvips version input,
-# or pushing a tag matching binaries-vips-*.
+# Triggers — the same release contract as Notcurses-Native:
+#   * push of a `binaries-vips-*` tag: builds every platform and
+#     publishes, but only if the tag equals BINARY_TAG (checked by
+#     every build job and again by publish).
+#   * workflow_dispatch: builds and probes every platform, and stops.
+#     A dry run — never publishes, from any ref, so validating the
+#     recipe can never overwrite the assets every installed dist
+#     checksum-verifies against.
+#   * branch pushes never run this workflow; test.yml and
+#     glibc-fallback.yml are the CI for those.
 
 on:
   workflow_dispatch:
@@ -27,7 +51,7 @@ on:
 
 jobs:
   # ---------------------------------------------------------------
-  # macOS arm64 — Homebrew bottle
+  # macOS arm64 — conda-forge libvips package (macOS 11+)
   # ---------------------------------------------------------------
   build-macos:
     name: build-macos-arm64
@@ -70,353 +94,20 @@ jobs:
           echo "vips_version=$VIPS_VERSION" >> "$GITHUB_OUTPUT"
           echo "binary_tag=$BINARY_TAG"     >> "$GITHUB_OUTPUT"
 
-      - name: Install vips via Homebrew
-        run: |
-          set -euxo pipefail
-          # Homebrew bottles are version-pinned per formula. We can
-          # `brew install vips@${VIPS_VERSION}` only if a versioned
-          # formula exists; otherwise install latest and assert the
-          # version matches what we requested.
-          brew update
-          brew install vips dylibbundler
-          INSTALLED=$(brew list --versions vips | awk '{print $2}')
-          REQUESTED='${{ steps.vars.outputs.vips_version }}'
-          # Homebrew versions sometimes carry a _N revision suffix
-          # (e.g. 8.18.2_1). Compare on the leading MAJOR.MINOR.PATCH
-          # only so a homebrew rebump doesn't break us.
-          INSTALLED_MMP=$(echo "$INSTALLED" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')
-          if [[ "$INSTALLED_MMP" != "$REQUESTED" ]]; then
-            echo "❌ Homebrew installed vips $INSTALLED ($INSTALLED_MMP) but workflow"
-            echo "   requested $REQUESTED. Bump BINARY_TAG to match Homebrew's"
-            echo "   current version, or pin via an explicit formula URL."
-            exit 1
-          fi
-
-      - name: Stage + bundle
-        run: |
-          set -euxo pipefail
-          BREW_PREFIX=$(brew --prefix)
-          VIPS_CELLAR=$(brew --prefix vips)
-          mkdir -p bundle
-
-          # Stage the entry-point lib(s) — dylibbundler will pull in
-          # transitive deps automatically. Use -of (overwrite files,
-          # not -od which wipes the dest dir).
-          cp "$VIPS_CELLAR/lib/libvips.42.dylib" bundle/
-
-          # `-s` paths tell dylibbundler where to look for sibling
-          # libs by their @rpath / unqualified install_name refs.
-          # Adding both the brew prefix lib dir and each tapped
-          # cellar's lib dir covers the usual layout.
-          dylibbundler \
-              -of \
-              -b \
-              -x bundle/libvips.42.dylib \
-              -d bundle \
-              -p '@loader_path/' \
-              -s "$BREW_PREFIX/lib" \
-              -s "$BREW_PREFIX/opt/glib/lib" \
-              -s "$BREW_PREFIX/opt/gettext/lib" \
-              -s "$BREW_PREFIX/opt/libffi/lib"
-
-          # dylibbundler rewrites dependency refs on its -x input
-          # but leaves the input's own LC_ID_DYLIB (install_name)
-          # alone. That means our bundled libvips.42.dylib still
-          # advertises itself as
-          # `/opt/homebrew/opt/vips/lib/libvips.42.dylib`, which
-          # causes dyld to treat it as if loaded from that path and
-          # can trigger a second libvips being loaded from the
-          # Homebrew location later. Rewrite the id to a self-
-          # referential @loader_path form so dyld identifies the
-          # bundled copy as authoritative.
-          install_name_tool -id '@loader_path/libvips.42.dylib' \
-              bundle/libvips.42.dylib
-
-          # vips 8.15+ splits format loaders (pngload, jpegload,
-          # heifload, webpsave, …) into separately-dlopen'd modules
-          # under $VIPS_CELLAR/lib/vips-modules-<abi>/. dylibbundler
-          # only follows link-time deps, so without an explicit copy
-          # the bundle ships with a libvips that can't open any
-          # image formats — vips_image_new_from_file() silently
-          # returns NULL. Stage the modules alongside libvips and
-          # rebundle their own inter-lib refs so they find the
-          # bundled libvips via @loader_path/../.
-          MODULES_SRC=$(find "$VIPS_CELLAR/lib" -maxdepth 1 -type d \
-              -name 'vips-modules-*' | head -n1)
-          if [[ -z "$MODULES_SRC" ]]; then
-              # Static-loader vips would render this a no-op; we
-              # haven't seen Homebrew ship that variant, so treat
-              # the missing dir as a Homebrew-layout regression
-              # worth halting the build over rather than silently
-              # producing a broken bundle.
-              echo "❌ No vips-modules-* dir found under $VIPS_CELLAR/lib."
-              echo "   Homebrew-provided libvips is expected to split format"
-              echo "   loaders into modules from 8.15+. Bundle would be"
-              echo "   unable to open any image format — failing hard."
-              ls -la "$VIPS_CELLAR/lib"
-              exit 1
-          fi
-          # Preserve Homebrew's dir name verbatim — libvips computes
-          # the module search path as $VIPSHOME/lib/vips-modules-<M>.<m>/
-          # at runtime (FFI.rakumod sets VIPSHOME to the staged parent),
-          # so the bundle's dir name has to match exactly or libvips
-          # finds nothing. Renaming to a plain "vips-modules" here
-          # would break the prefix lookup.
-          MODULES_BASENAME=$(basename "$MODULES_SRC")
-          MODULES_DEST="bundle/$MODULES_BASENAME"
-          mkdir -p "$MODULES_DEST"
-          # Show what's actually in there before copying — helps
-          # diagnose future layout changes (e.g. Homebrew switching
-          # to static loaders would leave this dir empty, which we
-          # want to fail loudly on, not silently).
-          echo "--- $MODULES_SRC contents ---"
-          ls -la "$MODULES_SRC"
-          module_count=$(find "$MODULES_SRC" -maxdepth 1 -type f | wc -l)
-          if (( module_count == 0 )); then
-              echo "❌ $MODULES_SRC is empty — Homebrew vips may have"
-              echo "   switched to static loaders. Bundle cannot proceed;"
-              echo "   investigate before publishing."
-              exit 1
-          fi
-          cp "$MODULES_SRC"/* "$MODULES_DEST"/
-
-          # Recursively bundle the vips-modules' full transitive
-          # dep closure.
-          #
-          # dylibbundler only follows *link-time* deps of its -x
-          # target. The vips-modules (vips-heif, vips-jxl, vips-
-          # magick, vips-openslide, vips-poppler) are dlopen'd by
-          # libvips at init time, so dylibbundler never sees them
-          # nor their transitive deps (libheif, libjxl,
-          # libMagickCore, libopenslide, libpoppler + everything
-          # those pull — libgio via libpoppler-glib etc.). If those
-          # deps are left referencing Homebrew absolute paths, dyld
-          # loads Homebrew's copies at runtime, which on macOS
-          # causes duplicate libgio / libglib / libgobject loads →
-          # duplicate GObject type registration, duplicate
-          # Objective-C class registration (GNotificationCenter-
-          # Delegate etc.) → test failures on runners where our
-          # bundled glib happens to match Homebrew's version.
-          #
-          # The recursive bundler below walks each module's
-          # deps via otool -L, copies missing deps into bundle/ at
-          # top level, rewrites their install_name to @loader_path/
-          # so siblings find each other, and recurses into the new
-          # dep's own deps. Module refs themselves get rewritten
-          # to @loader_path/../ since modules live one dir deeper.
-          # The end state: bundle/ contains the full closure,
-          # zero absolute /opt/homebrew paths in any Mach-O file,
-          # no surprise loads at runtime.
-          bundle_deps() {
-              local target="$1"
-              local prefix="$2"  # @loader_path/ or @loader_path/../
-              chmod +w "$target"
-              # First line of `otool -L` on a dylib is the target's
-              # own LC_ID_DYLIB — skip with tail -n +2. Remaining
-              # lines are its LC_LOAD_DYLIBs.
-              otool -L "$target" | tail -n +2 | awk '{print $1}' \
-                  | while read -r dep; do
-                  [[ -z "$dep" ]] && continue
-                  # System libs stay dynamic — always present on every
-                  # macOS install, different per OS version by design.
-                  case "$dep" in
-                      /usr/lib/*|/System/*) continue ;;
-                      # Already @loader_path-relative — nothing to do.
-                      '@loader_path'/*) continue ;;
-                  esac
-                  local base="${dep##*/}"
-                  # Resolve the source to copy from. For @rpath refs
-                  # we don't have rpath info here; best-effort search
-                  # under Homebrew by basename. Most Homebrew formulae
-                  # use absolute LC_LOAD_DYLIB paths so this is rare.
-                  local actual=""
-                  case "$dep" in
-                      '@rpath'/*|'@executable_path'/*)
-                          # No reliable way to know which LC_RPATH
-                          # the caller had without parsing otool -l
-                          # again; best-effort search under Homebrew
-                          # by basename. Fail hard if not found —
-                          # leaving an unresolvable @rpath in a
-                          # bundled binary means silent runtime
-                          # failures in dlopen, which is exactly the
-                          # class of bug this bundler exists to
-                          # prevent.
-                          # -L tells find to follow symlinks so it can
-                          # resolve Homebrew's /opt/homebrew/opt/<formula>
-                          # → /opt/homebrew/Cellar/<formula>/<ver> link
-                          # scheme. Without -L, `-type f` rejects the
-                          # symlink and misses the real file behind it.
-                          actual=$(find -L "$BREW_PREFIX" -maxdepth 6 \
-                              -name "$base" -type f 2>/dev/null \
-                              | head -n1)
-                          if [[ -z "$actual" ]]; then
-                              echo "❌ cannot resolve $dep ($base)" \
-                                   "under $BREW_PREFIX"
-                              echo "   target: $target"
-                              echo "   this would leave an unresolvable"
-                              echo "   @rpath/@executable_path ref in a"
-                              echo "   bundled binary — fix the bundler"
-                              echo "   or add an explicit ignore."
-                              exit 1
-                          fi
-                          ;;
-                      /*)
-                          actual="$dep"
-                          # Follow symlinks (e.g. libjpeg.8.dylib ->
-                          # libjpeg.8.3.2.dylib). Copy the real file
-                          # but keep the ref-site basename.
-                          while [[ -L "$actual" ]]; do
-                              local link
-                              link=$(readlink "$actual")
-                              case "$link" in
-                                  /*) actual="$link" ;;
-                                  *)  actual="$(dirname "$actual")/$link" ;;
-                              esac
-                          done
-                          ;;
-                      *)
-                          echo "WARN: unrecognised dep format '$dep' — skipping"
-                          continue
-                          ;;
-                  esac
-                  [[ -f "$actual" ]] || {
-                      echo "❌ resolved path $actual does not exist"
-                      echo "   target: $target, dep: $dep"
-                      echo "   otool reported this dep but it's not on disk —"
-                      echo "   broken symlink? Halting before shipping a bundle"
-                      echo "   with stale refs."
-                      exit 1
-                  }
-                  # Add to bundle/ if new.
-                  if [[ ! -f "bundle/$base" ]]; then
-                      cp "$actual" "bundle/$base"
-                      chmod +w "bundle/$base"
-                      install_name_tool -id "@loader_path/$base" "bundle/$base"
-                      # Recurse — the dep lives at top level now, so
-                      # its own refs to siblings use @loader_path/.
-                      bundle_deps "bundle/$base" "@loader_path/"
-                  fi
-                  # Rewrite this target's ref to the bundled copy.
-                  install_name_tool -change "$dep" "${prefix}${base}" "$target"
-              done
-              # Strip stale LC_RPATH entries; everything's @loader_path
-              # now so rpath search is redundant and would just slow
-              # dyld probing.
-              otool -l "$target" \
-                  | awk '/LC_RPATH/{flag=1; next} flag && /path /{print $2; flag=0}' \
-                  | while read -r rp; do
-                  install_name_tool -delete_rpath "$rp" "$target" 2>/dev/null || true
-              done
-          }
-
-          shopt -s nullglob
-          for mod in "$MODULES_DEST"/*; do
-              [[ -L "$mod" ]] && continue
-              [[ -f "$mod" ]] || continue
-              file "$mod" | grep -q 'Mach-O' || continue
-              bundle_deps "$mod" "@loader_path/../"
-          done
-
-          # Sanity audit: every Mach-O dep should be either @loader_path-
-          # relative (our bundled siblings) or /usr/lib/ or /System/
-          # (system libs we deliberately keep dynamic). Anything else
-          # is a bundler miss — a Homebrew absolute path (dyld will
-          # load the system copy) or a surviving @rpath/@executable_path
-          # with no rpath to resolve against (silent dlopen failure at
-          # runtime). Fail loud rather than ship a broken archive.
-          echo "--- audit: scanning for non-self-contained refs ---"
-          stray=0
-          while read -r f; do
-              file "$f" 2>/dev/null | grep -q 'Mach-O' || continue
-              # Skip the first otool line (target's own LC_ID_DYLIB —
-              # irrelevant to load-time resolution of deps).
-              bad=$(otool -L "$f" 2>/dev/null | tail -n +2 | awk '{print $1}' \
-                      | grep -vE '^@loader_path/|^/usr/lib/|^/System/' || true)
-              if [[ -n "$bad" ]]; then
-                  echo "❌ $f has non-self-contained refs:"
-                  echo "$bad" | sed 's/^/     /'
-                  stray=$((stray + 1))
-              fi
-          done < <(find bundle -type f ! -type l)
-          if (( stray > 0 )); then
-              echo "❌ $stray file(s) leaked non-self-contained refs."
-              echo "   Bundle would load libs from outside bundle/ at runtime,"
-              echo "   which is the class of bug this bundler exists to prevent."
-              exit 1
-          fi
-          echo "✅ every Mach-O dep resolves within bundle/ or to /usr/lib/-/System/."
-
-          # Codesign — dylibbundler's install_name_tool calls
-          # invalidate the linker-emitted ad-hoc signature. macOS
-          # Sequoia kernel SIGKILLs on tainted page access without
-          # a valid sig. Same fix as Notcurses-Native.
-          find bundle -name '*.dylib' -type f ! -type l \
-            -exec codesign --force --sign - --timestamp=none {} \;
-          # Format-loader modules are typically .so on macOS (glib's
-          # GIOModule convention) but suffix varies — codesign every
-          # regular Mach-O file under the modules dir regardless of
-          # extension.
-          find "$MODULES_DEST" -type f ! -type l | while read -r mod; do
-              file "$mod" | grep -q 'Mach-O' || continue
-              codesign --force --sign - --timestamp=none "$mod"
-          done
-          for f in bundle/*.dylib; do
-            [[ -L "$f" ]] && continue
-            codesign --verify "$f" || { echo "❌ $f failed verify"; exit 1; }
-          done
-          find "$MODULES_DEST" -type f ! -type l | while read -r mod; do
-              file "$mod" | grep -q 'Mach-O' || continue
-              codesign --verify "$mod" \
-                  || { echo "❌ $mod failed verify"; exit 1; }
-          done
-
-          # Compile the varargs shim (src/vips_native_shim.c) and
-          # link it against the bundled libvips. Raku's NativeCall
-          # can't marshal C variadics correctly under Apple arm64's
-          # ABI (named args in registers, varargs on stack — but
-          # NativeCall puts everything in registers because it
-          # doesn't know the callee is variadic). The shim gives
-          # every variadic libvips entry point an honest non-
-          # variadic signature so NativeCall marshals them
-          # correctly. See src/vips_native_shim.c for the full
-          # rationale and per-function wrappers.
-          # vips_shim_free wraps g_free (libglib), so the shim has a
-          # cross-library symbol the link must resolve. We bundle
-          # libglib already (sanity-checked in the Build.rakumod
-          # extract step), but its versioned filename varies
-          # (libglib-2.0.0.dylib at the moment, libglib-2.0.<major>.dylib
-          # in general). Glob it instead of hardcoding.
-          GLIB_DYLIB=$(ls bundle/libglib-2.0.*.dylib 2>/dev/null | head -1)
-          if [[ -z "$GLIB_DYLIB" ]]; then
-            echo "❌ no libglib-2.0.*.dylib in bundle/ — can't link shim"
-            ls bundle/
-            exit 1
-          fi
-          cc -O2 -dynamiclib -fPIC \
-              -install_name '@loader_path/libvips_shim.dylib' \
-              -o bundle/libvips_shim.dylib \
-              src/vips_native_shim.c \
-              bundle/libvips.42.dylib \
-              "$GLIB_DYLIB"
-
-          # Sidecar for Build.rakumod's content-based freshness
-          # check: the SHA-256 of the shim source this shim was
-          # compiled from. Without it, installs fall back to a
-          # cross-machine mtime comparison that always thinks the
-          # dist's source is newer than the bundled shim and
-          # recompiles on every install (or warns without a
-          # toolchain — fatal for image loads on arm64, where the
-          # varargs ABI makes the shim mandatory).
-          shasum -a 256 src/vips_native_shim.c | awk '{print $1}' \
-            > bundle/libvips_shim.dylib.srchash
-
-          # Symlinks for the unversioned name so resolution works
-          # whether the caller asks for `libvips.dylib` or the
-          # versioned `libvips.42.dylib`.
-          ln -sf libvips.42.dylib bundle/libvips.dylib
-
-          echo "--- bundle contents ---"
-          ls -la bundle/
+      # Everything — fetching a pinned micromamba, creating the conda
+      # prefix (libvips pinned by version AND build string), bundling
+      # libvips + its loader modules + their dependency closure with
+      # @loader_path relocation, the varargs shim and its export check,
+      # ad-hoc signing, the arm64 / minos <= 11.0 / self-containment
+      # audit, and the THIRD-PARTY.md + LICENSES/ notices kit — lives in
+      # the script so it runs identically on a developer's Mac. No Homebrew: its vips bottle tracks only the
+      # newest macOS (8.18.7 shipped for macOS 26 alone).
+      - name: Stage + bundle (conda-forge libvips)
+        env:
+          VIPS_VERSION: ${{ steps.vars.outputs.vips_version }}
+          BINARY_TAG: ${{ steps.vars.outputs.binary_tag }}
+          WORK_DIR: ${{ runner.temp }}/vips-macos-arm64
+        run: bash scripts/ci/bundle-macos-arm64.sh bundle
 
       - name: Package archive
         id: package
@@ -428,6 +119,9 @@ jobs:
           shasum -a 256 "$artifact" | tee "${artifact}.sha256"
           mkdir -p artefacts
           mv "$artifact" "${artifact}.sha256" artefacts/
+
+      - name: Probe the archive (every loader decodes; self-contained)
+        run: bash scripts/ci/probe-bundle.sh artefacts/vips-macos-arm64.tar.gz "${{ steps.vars.outputs.binary_tag }}"
 
       - uses: actions/upload-artifact@v6
         with:
@@ -444,12 +138,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # libvips-build: conda-forge's build string for the libvips
+          # version in BINARY_TAG, pinned as the macOS lane pins its own
+          # (scripts/ci/bundle-macos-arm64.sh). Bump with BINARY_TAG:
+          #   micromamba search -c conda-forge --override-channels \
+          #       --platform <conda-subdir> 'libvips==<version>'
           - os: ubuntu-22.04
             platform: linux-x86_64-glibc
             conda-subdir: linux-64
+            libvips-build: he268db4_0
           - os: ubuntu-22.04-arm
             platform: linux-aarch64-glibc
             conda-subdir: linux-aarch64
+            libvips-build: h4590af0_0
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -495,117 +196,38 @@ jobs:
         shell: bash -el {0}
         run: |
           set -euxo pipefail
-          conda create -y -n vipsenv -c conda-forge \
-              "libvips=${{ steps.vars.outputs.vips_version }}"
+          # libvips by version AND build string; ImageMagick's
+          # imagemagick_* build rather than the agpl_* one the solver
+          # prefers (identical libraries, different declared licence — see
+          # scripts/ci/bundle-macos-arm64.sh). libvips depends on it, so
+          # it is in the environment, though the bundle leaves it out.
+          # The same specs go into the pack's THIRD-PARTY.md.
+          # --override-channels: conda-forge and nothing else, whatever
+          # channels the runner's condarc adds — the provenance the README
+          # and THIRD-PARTY.md state, as the macOS lane's micromamba has it.
+          SPECS="libvips=${{ steps.vars.outputs.vips_version }}=${{ matrix.libvips-build }} imagemagick=*=imagemagick_*"
+          read -r -a specs <<<"$SPECS"
+          conda create -y -n vipsenv --override-channels -c conda-forge "${specs[@]}"
+          conda list -n vipsenv
           # conda env's lib dir is where libvips + glib + the
           # format libs all live, with their real filenames.
           ENV_LIB="$CONDA/envs/vipsenv/lib"
           echo "ENV_LIB=$ENV_LIB" >> "$GITHUB_ENV"
+          echo "CONDA_SPECS=$SPECS" >> "$GITHUB_ENV"
 
+      # libvips + its loader modules (lib/vips-modules-<M>.<m>/, less
+      # ImageMagick's) + their dependency closure, $ORIGIN-relocated,
+      # with the env's C++ runtime (newer than ubuntu-22.04's, and
+      # required by libheif and poppler), the varargs shim, an audit
+      # that every ELF file resolves inside the bundle or to the system
+      # and that nothing of ImageMagick or Graphviz is in it, and the
+      # THIRD-PARTY.md + LICENSES/ notices kit. See the script.
       - name: Stage + bundle
         shell: bash -el {0}
-        run: |
-          set -euxo pipefail
-          mkdir -p bundle
-
-          # Start from libvips.so.42 and walk transitive deps via ldd.
-          # Skip system libs (anything under /usr or /lib) — those are
-          # base glibc / libstdc++ that any user system has.
-          cp "$ENV_LIB"/libvips.so.42* bundle/ || true
-          cp -d "$ENV_LIB"/libvips.so* bundle/ 2>/dev/null || true
-
-          declare -A SEEN
-          process_deps() {
-            local lib="$1"
-            local depth="${2:-0}"
-            (( depth > 12 )) && return 0
-            local key="$(basename "$lib")"
-            [[ -n "${SEEN[$key]:-}" ]] && return 0
-            SEEN[$key]=1
-            # LD_LIBRARY_PATH so ldd resolves transitive deps via the
-            # conda env first, not whatever the runner happens to
-            # have system-installed. Without this, glib/gobject etc
-            # come from /lib/aarch64-linux-gnu and get skipped as
-            # "system libs" — bundle ships missing its core deps.
-            LD_LIBRARY_PATH="$ENV_LIB:${LD_LIBRARY_PATH:-}" \
-              ldd "$lib" 2>/dev/null \
-              | sed -nE 's/^[[:space:]]*([^ ]+) => ([^ ]+) .*/\1\t\2/p' \
-              | while IFS=$'\t' read -r name path; do
-                  [[ -z "$path" ]] && continue
-                  # `=> not found` parses as path="not" — skip cleanly.
-                  # Anything starting with `not` (followed by whitespace
-                  # in the original ldd output) is one of these.
-                  [[ "$path" == "not" ]] && {
-                    echo "WARN: $name unresolved by ldd ('not found') — skipping"
-                    continue
-                  }
-                  # Path must be absolute + a real file.
-                  [[ "$path" != /* || ! -f "$path" ]] && continue
-                  # Skip system libs — these stay dynamic.
-                  case "$path" in
-                    /lib/*|/lib64/*|/usr/lib/*|/usr/lib64/*) continue ;;
-                  esac
-                  # Skip the linker itself.
-                  case "$name" in
-                    ld-linux*|linux-vdso*|libc.so*|libm.so*|libpthread.so*|libdl.so*|librt.so*|libstdc++.so*|libgcc_s.so*) continue ;;
-                  esac
-                  if [[ ! -f "bundle/$name" ]]; then
-                    cp "$path" "bundle/$name"
-                    echo "Bundled: $name (from $path)"
-                    process_deps "bundle/$name" $((depth + 1))
-                  fi
-                done
-          }
-
-          for lib in bundle/libvips.so*; do
-            [[ -L "$lib" ]] && continue
-            process_deps "$lib"
-          done
-
-          # Set $ORIGIN rpath on every bundled .so so they find each
-          # other by sibling lookup at runtime, regardless of where
-          # the user installs the bundle dir on disk.
-          for so in bundle/*.so*; do
-            [[ -L "$so" ]] && continue
-            patchelf --set-rpath '$ORIGIN' "$so" || true
-          done
-
-          # Convenience symlink for the unversioned name.
-          ln -sf libvips.so.42 bundle/libvips.so
-
-          # Same for libglib — needed to link the shim's
-          # vips_shim_free wrapper (which calls g_free, a libglib
-          # symbol). The bundled file is libglib-2.0.so.<major>;
-          # symlink the unversioned name so `-lglib-2.0` finds it.
-          GLIB_SO=$(ls bundle/libglib-2.0.so.* 2>/dev/null | head -1)
-          if [[ -z "$GLIB_SO" ]]; then
-            echo "❌ no libglib-2.0.so.* in bundle/ — can't link shim"
-            ls bundle/
-            exit 1
-          fi
-          ln -sf "$(basename "$GLIB_SO")" bundle/libglib-2.0.so
-
-          # Compile the varargs shim — same rationale as macOS.
-          # Linux aarch64 has the same AAPCS64 variadic ABI
-          # divergence as Apple arm64 (named args in registers,
-          # varargs on stack). The x86_64 ABI is forgiving (no
-          # register/stack split for varargs), but shipping the
-          # shim on both arches is cheap insurance and eliminates
-          # the latent UB entirely.
-          gcc -O2 -shared -fPIC \
-              -Wl,-soname,libvips_shim.so \
-              -o bundle/libvips_shim.so \
-              src/vips_native_shim.c \
-              -Lbundle -lvips -lglib-2.0
-          patchelf --set-rpath '$ORIGIN' bundle/libvips_shim.so
-          # Sidecar for Build.rakumod's content-based freshness
-          # check — see the macOS lane's comment for the full
-          # rationale.
-          sha256sum src/vips_native_shim.c | awk '{print $1}' \
-            > bundle/libvips_shim.so.srchash
-
-          echo "--- bundle contents ---"
-          ls -la bundle/
+        env:
+          BINARY_TAG: ${{ steps.vars.outputs.binary_tag }}
+          PACK_NAME: vips-${{ matrix.platform }}.tar.gz
+        run: bash scripts/ci/bundle-linux.sh "$ENV_LIB" bundle
 
       - name: Package archive
         run: |
@@ -615,6 +237,12 @@ jobs:
           sha256sum "$artifact" | tee "${artifact}.sha256"
           mkdir -p artefacts
           mv "$artifact" "${artifact}.sha256" artefacts/
+
+      # Runs on the build image itself (ubuntu-22.04, glibc 2.35 — the
+      # oldest system the Linux prebuilts promise), so a library that
+      # needs a newer glibc or C++ runtime than that fails here.
+      - name: Probe the archive (every loader decodes; self-contained)
+        run: bash scripts/ci/probe-bundle.sh "artefacts/vips-${{ matrix.platform }}.tar.gz" "${{ steps.vars.outputs.binary_tag }}"
 
       - uses: actions/upload-artifact@v6
         with:
@@ -715,13 +343,12 @@ jobs:
           # build-win64-mxe ships these under bin/vips-modules/; they
           # don't match the top-level *.dll glob above, so without
           # an explicit copy the bundle ships with a libvips that
-          # can't open any image format. FFI.rakumod sets
-          # VIPS_MODULEDIR to <staged-lib>/vips-modules at load time
-          # so libvips finds them here.
+          # can't open any image format.
           # Subdir name is versioned (e.g. vips-modules-8.18) — glob
           # it and let find pick the first match. Preserve that exact
           # name on copy so libvips's runtime module path
-          # ($VIPSHOME/lib/vips-modules-<M>.<m>/, set by FFI.rakumod)
+          # ($VIPSHOME/lib/vips-modules-<M>.<m>/; on Windows
+          # FFI.rakumod sets VIPSHOME to the staged lib dir's parent)
           # finds our staged copy.
           WIN_MODULES_SRC=$(find "$EXTRACT_DIR/bin" -maxdepth 1 -type d \
               -name 'vips-modules-*' | head -n1)
@@ -816,21 +443,99 @@ jobs:
               -l:libglib-2.0-0.dll
 
           # Verify our exports are in the DLL — guards against silent
-          # link failure. nm is in both UCRT64 (binutils) and
-          # CLANGARM64 (llvm-binutils-aliased); behaves identically
-          # for our purposes.
+          # link failure, and against a shim missing one function (the
+          # binding for it would die with "Cannot locate symbol" in an
+          # application, long after this job went green). Every
+          # vips_shim_* the source defines -- each definition opens a
+          # line, its return type on the line before -- must be among
+          # the DLL's exports, checked by name. nm is in both UCRT64
+          # (binutils) and CLANGARM64 (llvm-binutils-aliased); behaves
+          # identically for our purposes.
           echo "--- libvips_shim.dll exports ---"
           nm -g --defined-only bundle/libvips_shim.dll \
-              | grep -E 'T (_)?vips_shim_' || {
-                echo "❌ no vips_shim_* exports — link likely silent-failed."
-                exit 1
-              }
+              | sed -nE 's/.* T _?(vips_shim_[A-Za-z0-9_]+)$/\1/p' \
+              | sort -u | tee shim-exports.txt
+          grep -oE '^vips_shim_[A-Za-z0-9_]+' src/vips_native_shim.c \
+              | sort -u > shim-defined.txt
+          missing=$(comm -23 shim-defined.txt shim-exports.txt)
+          if [ -n "$missing" ]; then
+            echo "❌ libvips_shim.dll does not export: $missing"
+            exit 1
+          fi
+
+          # The freshness sidecar Build.rakumod reads, as the macOS and
+          # Linux jobs write it: the SHA-256 of the shim source this
+          # DLL was compiled from. Without it an install cannot tell
+          # this shim is current, and refreshes it from a compiler.
+          sha256sum src/vips_native_shim.c | awk '{print $1}' \
+            > bundle/libvips_shim.dll.srchash
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # THIRD-PARTY.md + LICENSES/: every DLL attributed to the
+      # build-win64-mxe component that built it (fails on one it can't
+      # be), and every component's licence, source and licence texts
+      # from scripts/ci/license-texts/windows/manifest.json, each text
+      # checked against its pinned SHA-256 (fails on a component the
+      # manifest does not list for this architecture, a version that
+      # disagrees with the release's versions.json, a text that does not
+      # match, or copyleft scripts/ci/disclosed.json does not disclose).
+      # See the script.
+      - name: Third-party notices
+        run: |
+          set -euxo pipefail
+          python scripts/ci/third-party.py mxe \
+              --zip-root "$EXTRACT_DIR" \
+              --zip-name "vips-dev-${{ matrix.mxe-arch }}-all-${{ steps.vars.outputs.vips_version }}.zip" \
+              --release "v${{ steps.vars.outputs.vips_version }}" \
+              --bundle bundle \
+              --pack "vips-${{ matrix.platform }}.zip" \
+              --tag "${{ steps.vars.outputs.binary_tag }}"
 
       - name: Package archive
         run: |
           set -euxo pipefail
           artifact="vips-${{ matrix.platform }}.zip"
           (cd bundle && 7z a "../$artifact" .)
+
+          # The notices kit must be in the archive, whole — the macOS and
+          # Linux lanes get this check from probe-bundle.sh: THIRD-PARTY.md,
+          # the GPL-3.0 text and our own licence; a LICENSES/<component>/
+          # directory for every component the licence-text manifest gives
+          # texts for and THIRD-PARTY.md lists for this pack; and every
+          # file the kit step wrote under LICENSES/ (~330 of them). 7z
+          # prints the paths it stores with backslashes; compare them with
+          # forward ones.
+          7z l -slt "$artifact" | sed -n 's/^Path = //p' | tr '\134' '/' | sort -u > archive-paths.txt
+          (cd bundle && find THIRD-PARTY.md LICENSES -type f) | sort -u > kit-paths.txt
+          python - "${{ matrix.platform }}" <<'PY'
+          import json, re, sys
+          arch = sys.argv[1].split('-', 1)[1]
+          archive = set(open('archive-paths.txt', encoding='utf-8').read().split('\n'))
+          kit = [p for p in open('kit-paths.txt', encoding='utf-8').read().split('\n') if p]
+          listed = set(re.findall(r'^\| ([A-Za-z0-9.+_-]+) \| ',
+                                  open('bundle/THIRD-PARTY.md', encoding='utf-8').read(), re.M))
+          manifest = json.load(open('scripts/ci/license-texts/windows/manifest.json',
+                                    encoding='utf-8'))['components']
+          dirs = sorted(k for k, c in manifest.items()
+                        if c['files'] and arch in c['platforms'] and k in listed)
+          problems = ['no %s' % p for p in ('THIRD-PARTY.md', 'LICENSES/GPL-3.0.txt',
+                                            'LICENSES/Vips-Native/LICENSE') if p not in archive]
+          problems += ['no LICENSES/%s/' % k for k in dirs
+                       if not any(p.startswith('LICENSES/%s/' % k) for p in archive)]
+          problems += ['no %s (the kit step wrote it)' % p for p in kit if p not in archive]
+          written = set(p.split('/')[1] for p in kit if p.count('/') >= 2) & set(manifest)
+          if not dirs or set(dirs) != written:
+              problems.append('THIRD-PARTY.md lists components with texts %s, the kit step wrote %s'
+                              % (sorted(set(dirs) - written), sorted(written - set(dirs))))
+          if problems:
+              print('❌ the archive is missing notices-kit entries:\n  ' + '\n  '.join(problems))
+              sys.exit(1)
+          print('✅ notices kit in the archive: %d files, %d component directories.' % (len(kit), len(dirs)))
+          PY
+
           sha256sum "$artifact" | tee "${artifact}.sha256"
           mkdir -p artefacts
           mv "$artifact" "${artifact}.sha256" artefacts/
@@ -847,18 +552,33 @@ jobs:
   publish:
     name: publish
     needs: [build-macos, build-linux, build-windows]
+    # A pushed binaries-vips-* tag, and nothing else, publishes. A
+    # workflow_dispatch builds and probes every platform and stops here —
+    # even when dispatched on a tag ref, which `github.ref` alone would
+    # not tell apart from a push — so "validate the recipe" and
+    # "overwrite the archives every installed dist checksum-verifies
+    # against" are never one click apart. Same gate as Notcurses-Native's
+    # _release-publish.yml.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/binaries-vips-')
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v6
 
-      - name: Resolve tag from BINARY_TAG
+      - name: Resolve tag from BINARY_TAG (must equal the pushed tag)
         id: vars
         run: |
           set -euxo pipefail
           BINARY_TAG="$(tr -d '[:space:]' < BINARY_TAG)"
           [[ -z "$BINARY_TAG" ]] && { echo "❌ BINARY_TAG empty"; exit 1; }
+          # The build jobs check this too; checked again here because
+          # this is the step that names the release.
+          pushed="${GITHUB_REF#refs/tags/}"
+          if [[ "$pushed" != "$BINARY_TAG" ]]; then
+            echo "❌ Pushed tag '$pushed' doesn't match BINARY_TAG '$BINARY_TAG'."
+            exit 1
+          fi
           echo "binary_tag=$BINARY_TAG" >> "$GITHUB_OUTPUT"
 
       - uses: actions/download-artifact@v7
@@ -887,5 +607,5 @@ jobs:
           else
             gh release create "$tag" release/* \
                 --title "$tag" \
-                --notes "Repackaged libvips prebuilts. See resources/checksums.txt in Vips-Native for the verified hashes."
+                --notes "Repackaged libvips prebuilts for Vips::Native. These archives redistribute third-party libraries, including GPL- and LGPL-licensed code; each one carries a THIRD-PARTY.md (every library file, the package it came from, its version, licence and source) and a LICENSES/ directory with the licence texts. See the Vips-Native README, \"Binary distributions and licensing\", and resources/checksums.txt in Vips-Native for the verified hashes."
           fi

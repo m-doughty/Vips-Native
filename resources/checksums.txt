@@ -1,13 +1,15 @@
 # Vips-Native prebuilt binary checksums.
 #
 # DO NOT hand-edit entries. After a binary release is published, CI
-# produces a checksums.txt as a release asset; copy its contents here:
+# produces a checksums.txt as a release asset; replace the entry lines
+# below with its contents, keeping this header:
 #
 #     gh release download "$(cat BINARY_TAG)" \
-#         --pattern checksums.txt --output /tmp/new.txt
-#     cp /tmp/new.txt resources/checksums.txt
-#     git add resources/checksums.txt
-#     git commit -m "Update binary checksums for $(cat BINARY_TAG)"
+#         --pattern checksums.txt --output new-checksums.txt
+#     { grep -E '^(#|$)' resources/checksums.txt; cat new-checksums.txt; } \
+#         > resources/checksums.txt.new
+#     mv resources/checksums.txt.new resources/checksums.txt
+#     rm new-checksums.txt
 #
 # Format: one entry per line
 #     <sha256-hex>  <artefact-filename>
@@ -19,15 +21,18 @@
 # `is native('vips')`) — same behaviour as Vips::Native 0.1.x.
 #
 # Each platform's archive bundles libvips + libgobject + libglib +
-# all the format-handling libs (jpeg/png/webp/tiff/gif/heif/avif and
-# their transitive deps), relocated with @loader_path (macOS) /
+# all the format-handling libs (jpeg/png/webp/tiff/gif/svg/heif/avif/
+# jxl/pdf/openslide, and magick on Windows only; heif, jxl, pdf,
+# openslide and magick as libvips loader modules) and their
+# transitive deps, relocated with @loader_path (macOS) /
 # $ORIGIN (Linux) / sibling DLL layout (Windows) so they load from
-# the same XDG-staged directory.
+# the same XDG-staged directory, plus the THIRD-PARTY.md + LICENSES/
+# notices kit staged beside them.
 #
 # Sources we repackage from (the binary trust chain):
-#   macOS arm64           Homebrew bottle (vips formula)
-#   Linux x86_64 / arm64  conda-forge libvips package
-#   Windows x86_64        libvips/build-win64-mxe GitHub release
+#   macOS arm64            conda-forge libvips package (osx-arm64)
+#   Linux x86_64 / arm64   conda-forge libvips package
+#   Windows x86_64 / arm64 libvips/build-win64-mxe GitHub release
 
 89bf961afdcc9d2d77241cff26d8c3e432e2b1956e686121a6dc289063c5c2f9  vips-linux-aarch64-glibc.tar.gz
 2a13756ac72ae97cbd22226378955ceca2cbca9a4522285bebe305d4269505dc  vips-linux-x86_64-glibc.tar.gz

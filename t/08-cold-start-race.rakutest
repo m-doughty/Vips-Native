@@ -1,0 +1,185 @@
+use Test;
+use lib 'lib';
+
+use NativeCall;
+use nqp;
+use Vips::Native::FFI;
+
+# Regression guard for the cold-start resolver race fixed in 0.6.5.
+#
+# The library-path resolvers in Vips::Native::FFI (vips-lib,
+# gobject-lib, shim-lib, USE-SHIM, cstdlib-lib) memoise a slow probe
+# — several directory walks each. They used to memoise it in a bare
+# `state $r = ...`, whose initialisation is NOT atomic: the slot is
+# marked initialised independently of the value landing in it, so a
+# thread arriving mid-initialisation reads `Any`. Milliseconds-wide
+# window, once per process, on the very first call.
+#
+# That is exactly the shape of a consumer app's startup: a pile of
+# worker threads whose first-ever decode all land together. The
+# failure was a coin flip — 16 of 25 cold launches on the machine
+# this was diagnosed on — and it presented as either
+# "expected Bool but got Any" out of USE-SHIM's return constraint, or
+# a `Str` type object handed to dlopen as a library name. Consumers
+# that wrap decodes in `try` just saw an image silently not appear.
+#
+# The race lives in the FIRST touch of the memos, so it can only be
+# observed from a process that has not touched them yet: the test
+# harness itself has, merely by loading the module. Hence child
+# processes. Each child hits the burst once, cold, and any thread
+# that fails to decode makes it exit non-zero.
+#
+# Flat assertions (not subtests): CI runs prove6 --verbose with
+# VIPS_INFO=1, and libvips's unindented VIPS-INFO lines break
+# TAP plan-parsing inside a subtest. See t/04-letterbox.rakutest.
+
+constant CAMELIA = 't/fixtures/camelia.png';
+
+# Cold launches to run, and threads per launch. Both are pure
+# probability knobs — the pre-fix per-launch failure rate at 64
+# threads was ~64%, so ten launches put a reintroduced race at
+# ~1-in-500,000 odds of sneaking through. VIPS_NATIVE_COLD_LAUNCHES
+# lets someone chasing a rare variant crank it without editing the
+# file.
+my Int $launches = (%*ENV<VIPS_NATIVE_COLD_LAUNCHES> // 10).Int;
+my Int $threads  = 64;
+
+plan 7 + $launches;
+
+# --- part 1: the resolvers agree with themselves across threads ------
+#
+# In-process, so the memos are already warm (the parent loaded the
+# module) — this is not the race test, it's the invariant test: every
+# thread must see one identical, non-Any answer. A memo that returned
+# `Any` to a late arrival, or that re-probed per thread and drifted,
+# fails here.
+
+for (vips-lib    => &vips-lib,
+	 gobject-lib => &gobject-lib,
+	 shim-lib    => &shim-lib,
+	 cstdlib-lib => &cstdlib-lib) -> (:key($name), :value(&resolver))
+{
+	my @seen = await (^32).map: { start resolver() };
+	ok @seen.grep({ $_ eqv @seen[0] }).elems == @seen.elems,
+		"$name returns one identical value to 32 concurrent callers";
+}
+
+# --- part 1b: a cstdlib-lib call site stays built --------------------
+#
+# Deterministic, and no threads needed. NativeCall asks whether a call
+# site still needs building every time it records a dispatch to the
+# sub, and asking re-opens the library on a COPY of the site with the
+# resolved name handed to dlopen verbatim. A name dlopen refuses there
+# (an empty one: macOS's dlopen("") fails) leaves the site reading as
+# unbuilt forever, so every recording rebuilds it in place while other
+# threads copy it half-written. That was the cold-start crash 0.6.5
+# fixes — the burst below only catches it a few launches in a hundred,
+# this catches its cause every time. Bind memcpy the way FFI.rakumod
+# does, call it once, and the site must read as built.
+{
+	sub probe-memcpy(Blob, Pointer, size_t --> Pointer)
+		is native(&cstdlib-lib) is symbol('memcpy') { * }
+
+	my $src = CArray[uint8].new(1, 2, 3);
+	my $dst = buf8.allocate(3);
+	probe-memcpy($dst, nativecast(Pointer, $src), 3);
+	is-deeply $dst.list, (1, 2, 3), 'memcpy through cstdlib-lib copies';
+	ok nqp::unbox_i(&probe-memcpy.call) == 1,
+		'a cstdlib-lib call site reads as built after its first call';
+}
+
+# --- part 2: cold-burst child processes ------------------------------
+
+my IO::Path $lib = $*PROGRAM.absolute.IO.parent.parent.add('lib');
+my IO::Path $fixture = CAMELIA.IO.absolute.IO;
+
+ok $fixture.f, "fixture {CAMELIA} is present";
+
+# The child. Written to a temp file rather than passed as `-e` so no
+# shell's idea of quoting can touch it. The image path travels as an
+# argument, and the library path as a `-I` argument, rather than
+# being interpolated into its source — so a Windows path full of
+# backslashes stays intact.
+#
+# The gate Promise is the whole point: without it the first worker to
+# start warms the memos while the rest are still being scheduled, and
+# there is no concurrent first touch to catch. Every worker parks on
+# the gate, then they are all released into their first-ever vips
+# call at once.
+#
+# Note the eager `for` loop building @workers. `(^N).map: { start … }`
+# is lazy — the start blocks would not exist until `await` iterated
+# the list, i.e. until after the gate was already open, and the
+# workers would trickle in one at a time.
+#
+# `Thread.start` rather than `start`, for the same reason but worse:
+# thread-pool tasks that `await` are parked as continuations and
+# resumed on however few pool threads exist, so opening the gate
+# releases them in batches rather than together. Real OS threads
+# blocked on the same Promise all wake at once, which is the only
+# arrangement that actually produces a concurrent *first* touch.
+#
+# Measured against a deliberately un-fixed copy of the module, per
+# launch: lazy `.map` + `start` — 0 of 10 detected; eager `start` —
+# 2 of 10; eager `Thread.start` — 12 of 15. The last is the one worth
+# shipping.
+my IO::Path $child =
+	$*TMPDIR.add("vips-native-cold-{$*PID}-{now.Int}.raku");
+END { $child.unlink if $child.e }
+
+$child.spurt: qq:to/CHILD/;
+    use Vips::Native;
+
+    my \$bytes = \@*ARGS[0].IO.slurp(:bin);
+    my \$gate  = Promise.new;
+    my atomicint \$bad = 0;
+    my \$lock = Lock.new;
+    my Str \@errors;
+
+    my \@workers;
+    for ^$threads \{
+        \@workers.push: Thread.start(\{
+            await \$gate;
+            my \$decoded = try decode-to-rgba(\$bytes);
+            my \$err = \$!;
+            if \$err \{
+                \$bad⚛++;
+                \$lock.protect: \{ \@errors.push: \$err.Str.lines.head \}
+            \}
+            elsif !\$decoded.defined \{
+                \$bad⚛++;
+                \$lock.protect: \{ \@errors.push: 'decode returned undefined' \}
+            \}
+        \});
+    \}
+
+    \$gate.keep;
+    .finish for \@workers;
+
+    if \$bad \{
+        note "bad=\$bad of $threads: " ~ \@errors.unique.join(' | ');
+        exit 1;
+    \}
+    exit 0;
+    CHILD
+
+for ^$launches -> $launch {
+	# Proc handling by hand: a *sunk* failing Proc throws when it is
+	# GC'd, outside any `try` meant to contain it. Assign it, drain
+	# both handles (a full pipe buffer would deadlock the child),
+	# then read .exitcode — and .signal, because a child killed by a
+	# signal reports exitcode 0. A segfault is this race's commonest
+	# symptom, and checking the exitcode alone passed it.
+	my $proc = run $*EXECUTABLE, "-I{$lib.absolute}",
+				   $child.absolute, $fixture.absolute, :out, :err;
+	my Str $out = $proc.out.slurp(:close) // '';
+	my Str $err = $proc.err.slurp(:close) // '';
+
+	ok $proc.exitcode == 0 && $proc.signal == 0,
+		"cold launch {$launch + 1}/$launches: all $threads first-touch"
+		~ " decodes succeeded"
+		or diag "exitcode {$proc.exitcode} signal {$proc.signal}\n"
+			~ "out: $out\nerr: $err";
+}
+
+done-testing;

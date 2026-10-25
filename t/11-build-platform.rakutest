@@ -1,0 +1,145 @@
+use Test;
+
+# Build.rakumod is the dist's `build:` script, not a module in `provides`,
+# so it is EVALFILE'd at BEGIN time to bring the class into scope (as
+# t/10-build-shim does).
+BEGIN EVALFILE $*PROGRAM.parent.parent.child('Build.rakumod').absolute;
+
+# Which prebuilt an install asks for, and what it accepts as one: the
+# platform slug for each OS/hardware pair Raku reports, the asset that
+# slug downloads, that every such asset is one the release workflow
+# builds and resources/checksums.txt pins, what an x86_64 macOS install
+# is told instead, and that an unpacked archive is only accepted with its
+# THIRD-PARTY.md + LICENSES/ notices kit beside the libraries.
+
+plan 7;
+
+my IO::Path $dist = $*PROGRAM.parent.parent;
+
+my IO::Path $root = $*TMPDIR.add("vips-native-build-platform-{$*PID}-{now.Int}");
+$root.mkdir;
+END { Build::remove-tree($root) if $root.e }
+
+sub fixture(Str $name, *@entries --> IO::Path) {
+	my IO::Path $dir = $root.add($name);
+	$dir.mkdir;
+	for @entries -> $e {
+		if $e.ends-with('/') {
+			$dir.add($e.chop).mkdir;
+		}
+		else {
+			$dir.add($e).spurt('');
+		}
+	}
+	$dir;
+}
+
+my %expected =
+	'darwin arm64'    => 'macos-arm64',
+	'linux x86_64'    => 'linux-x86_64-glibc',
+	'linux aarch64'   => 'linux-aarch64-glibc',
+	'win32 x86_64'    => 'windows-x86_64',
+	'win32 aarch64'   => 'windows-arm64',
+	'mswin32 x86_64'  => 'windows-x86_64',
+	'mswin32 aarch64' => 'windows-arm64',
+;
+
+subtest 'platform-slug: the prebuilt each platform gets' => {
+	plan %expected.elems + 2;
+	for %expected.sort -> (:$key, :$value) {
+		my ($os, $hw) = $key.words;
+		is Build::platform-slug($os, $hw), $value, "$os / $hw → $value";
+	}
+	is Build::platform-slug('Darwin', 'ARM64'), 'macos-arm64',
+		'whatever case the kernel reports';
+	is Build::platform-slug('MSWin32', 'X86_64'), 'windows-x86_64',
+		'Windows as Rakudo spells it';
+};
+
+subtest 'platform-slug: platforms without one fall back to system libvips' => {
+	plan 6;
+	nok Build::platform-slug('darwin', 'x86_64').defined,
+		'x86_64 macOS — an Intel Mac, or an x86_64 Raku under Rosetta';
+	nok Build::platform-slug('linux', 'armv7l').defined, '32-bit ARM Linux';
+	nok Build::platform-slug('freebsd', 'amd64').defined, 'FreeBSD';
+	nok Build::platform-slug('linux', 'riscv64').defined, 'RISC-V Linux';
+	nok Build::platform-slug(Str, Str).defined, 'an OS and hardware Raku could not report';
+	nok Build::platform-slug('', '').defined, 'or reported empty';
+};
+
+subtest 'artifact-name: the asset a slug downloads' => {
+	plan 3;
+	is Build::artifact-name('macos-arm64'), 'vips-macos-arm64.tar.gz', 'macOS: a tarball';
+	is Build::artifact-name('linux-aarch64-glibc'), 'vips-linux-aarch64-glibc.tar.gz',
+		'Linux: a tarball';
+	is Build::artifact-name('windows-arm64'), 'vips-windows-arm64.zip', 'Windows: a zip';
+};
+
+subtest 'every selectable asset is built by the workflow and pinned' => {
+	# The drift this catches: Build asking for an asset name the release
+	# does not publish (the r12 universal-archive plan would have been
+	# exactly that), which installs as "checksum missing" and silently
+	# falls back to whatever system libvips there is.
+	my @assets = %expected.values.unique.sort.map({ Build::artifact-name($_) });
+	plan @assets.elems * 2;
+	my Str $workflow = $dist.add('.github/workflows/build-binaries.yml').slurp;
+	my %pinned is Set = $dist.add('resources/checksums.txt').slurp.lines
+		.grep({ .chars && !.starts-with('#') }).map({ .words[1] // '' });
+	my %built is Set = |$workflow.comb(/ 'artifact="' <( 'vips-' <-["$]>+ )> '"' /),
+		|$workflow.comb(/ ^^ \s* 'platform:' \s* <( \S+ )> $$ /).map({ Build::artifact-name($_) });
+	for @assets -> $asset {
+		ok %built{$asset}, "$asset is built by build-binaries.yml";
+		ok %pinned{$asset}, "$asset has a checksum in resources/checksums.txt";
+	}
+};
+
+subtest 'no-prebuilt-hint: what x86_64 macOS is told' => {
+	plan 5;
+	my $hint = Build::no-prebuilt-hint('darwin', 'x86_64');
+	ok $hint.defined, 'x86_64 macOS gets a hint';
+	ok $hint.contains('VIPS_NATIVE_LIB_DIR'), 'naming the override';
+	ok $hint.contains('arm64 libvips cannot load into an x86_64 process'),
+		'and why an arm64 Homebrew libvips does not help';
+	nok Build::no-prebuilt-hint('darwin', 'arm64').defined, 'arm64 macOS has a prebuilt';
+	nok Build::no-prebuilt-hint('linux', 'riscv64').defined,
+		'other platforms: the fallback note says it all';
+};
+
+subtest 'stage-problems: a complete unpacked bundle' => {
+	plan 4;
+	my $mac = fixture('mac', 'libvips.42.dylib', 'libgobject-2.0.0.dylib',
+		'libglib-2.0.0.dylib', 'THIRD-PARTY.md', 'LICENSES/');
+	is-deeply Build::stage-problems($mac, 'dylib'), (), 'macOS layout';
+	my $linux = fixture('linux', 'libvips.so.42', 'libgobject-2.0.so.0',
+		'libglib-2.0.so.0', 'THIRD-PARTY.md', 'LICENSES/');
+	is-deeply Build::stage-problems($linux, 'so'), (), 'Linux layout';
+	my $win = fixture('win', 'libvips-42.dll', 'libgobject-2.0-0.dll',
+		'libglib-2.0-0.dll', 'THIRD-PARTY.md', 'LICENSES/');
+	is-deeply Build::stage-problems($win, 'dll'), (), 'Windows layout';
+	is-deeply Build::stage-problems($mac, 'so'),
+		('no libvips.so', 'no libgobject-2.0.so', 'no libglib-2.0.so'),
+		'the right libraries for the wrong platform are no bundle';
+};
+
+subtest 'stage-problems: an archive without its notices is refused' => {
+	plan 5;
+	my $bare = fixture('bare', 'libvips.so.42', 'libgobject-2.0.so.0', 'libglib-2.0.so.0');
+	is-deeply Build::stage-problems($bare, 'so'), ('no THIRD-PARTY.md', 'no LICENSES/'),
+		'libraries alone: both halves of the kit missing';
+	my $no-texts = fixture('no-texts', 'libvips.so.42', 'libgobject-2.0.so.0',
+		'libglib-2.0.so.0', 'THIRD-PARTY.md');
+	is-deeply Build::stage-problems($no-texts, 'so'), ('no LICENSES/',),
+		'the notices without the licence texts';
+	my $file-not-dir = fixture('file-not-dir', 'libvips.so.42', 'libgobject-2.0.so.0',
+		'libglib-2.0.so.0', 'THIRD-PARTY.md', 'LICENSES');
+	is-deeply Build::stage-problems($file-not-dir, 'so'), ('no LICENSES/',),
+		'a file called LICENSES is not the directory of texts';
+	my $no-vips = fixture('no-vips', 'libvips-cpp.so.42', 'libgobject-2.0.so.0',
+		'libglib-2.0.so.0', 'THIRD-PARTY.md', 'LICENSES/');
+	is-deeply Build::stage-problems($no-vips, 'so'), ('no libvips.so',),
+		'the C++ binding alone is not libvips';
+	is-deeply Build::stage-problems($root.add('missing'), 'so'),
+		('no libvips.so', 'no libgobject-2.0.so', 'no libglib-2.0.so',
+		 'no THIRD-PARTY.md', 'no LICENSES/'),
+		'a stage that does not exist lacks everything, without dying';
+};

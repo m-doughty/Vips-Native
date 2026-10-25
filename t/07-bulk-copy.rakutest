@@ -1,0 +1,236 @@
+use Test;
+use lib 'lib';
+
+use NativeCall;
+use Vips::Native;
+use Vips::Native::FFI;
+
+# Pixel buffers move between libvips's heap and Raku in a single
+# memcpy (buf-from-native / native-copy-of in Vips::Native::FFI).
+# They used to move in a Raku-level `$out[$_] = $bytes[$_] for ^$n`
+# loop, which for a 4000×3000 RGBA decode is 48 million iterations —
+# roughly 11.7 s of the ~11.8 s that decode took.
+#
+# Speed is only half the requirement; the bytes have to be the SAME
+# bytes. So this file never asserts against a hand-copied expectation:
+# every check computes its reference with the *old* mechanism — a
+# per-byte read loop over the very same native memory — and demands
+# byte-identity. If memcpy ever mis-marshals a length, an offset, or
+# a Blob's storage pointer, these fail.
+#
+# Flat assertions (not subtests): CI runs prove6 --verbose with
+# VIPS_INFO=1, and libvips's unindented VIPS-INFO lines break
+# TAP plan-parsing inside a subtest. See t/04-letterbox.rakutest.
+
+constant CAMELIA = 't/fixtures/camelia.png';
+constant ALPHA   = 't/fixtures/alpha-split.png';
+constant RGB     = 't/fixtures/rgb-solid.png';
+
+# Byte values that are deliberately awkward: every one of the 256
+# values appears, high bits are exercised (a sign-extension bug in the
+# marshalling would show up as 0xFF-vs-0x7F noise), and the pattern
+# does not repeat on any power-of-two boundary.
+sub pattern(Int $i --> Int) { ($i * 37 + ($i div 251) * 13 + 7) % 256 }
+
+# The reference reader: exactly what the code used to do.
+sub per-byte-read(Pointer $ptr, Int $n --> Buf[uint8]) {
+	my $view = nativecast(CArray[uint8], $ptr);
+	my $out  = buf8.allocate($n);
+	$out[$_] = $view[$_] for ^$n;
+	$out;
+}
+
+# The reference writer, for checking the input direction. Never
+# .allocate(0): Rakudo sizes the array by binding index $n - 1, so a
+# zero request underflows the storage by one byte (see native-copy-of).
+sub per-byte-write(Blob $src --> CArray[uint8]) {
+	my $ca = $src.elems > 0
+		?? CArray[uint8].allocate($src.elems)
+		!! CArray[uint8].new;
+	$ca[$_] = $src[$_] for ^$src.elems;
+	$ca;
+}
+
+# Sizes: empty, single byte, sub-word, an exact 256-boundary and both
+# sides of it, a page-ish size, and something big enough that a bulk
+# copy is doing real work — with a deliberately non-round tail.
+my @sizes = 0, 1, 3, 7, 255, 256, 257, 4096, 1048579;
+
+# --- out direction: native memory → Buf --------------------------------------
+
+for @sizes -> $n {
+	my $ca = CArray[uint8].allocate(max($n, 1));
+	$ca[$_] = pattern($_) for ^$n;
+	my $ptr = nativecast(Pointer, $ca);
+
+	my $want = per-byte-read($ptr, $n);
+	my $got  = buf-from-native($ptr, $n);
+
+	ok $got eqv $want,
+		"buf-from-native($n) is byte-identical to a per-byte read loop";
+	is $got.bytes, $n, "buf-from-native($n) returns exactly $n bytes";
+	isa-ok $got, Buf[uint8], "buf-from-native($n) returns a Buf[uint8]";
+
+	# Root the source until after both reads (the CArray is the only
+	# thing keeping that memory alive).
+	$ca.so;
+}
+
+# A null pointer with a zero length must be inert, not a segfault: the
+# callers pair (ptr, len) straight from libvips and a zero-byte image
+# is not this function's problem to diagnose.
+ok buf-from-native(Pointer.new(0), 0) eqv buf8.allocate(0),
+	'buf-from-native(NULL, 0) yields an empty Buf without dereferencing';
+
+dies-ok { buf-from-native(Pointer.new(1), -1) },
+	'buf-from-native rejects a negative length loudly';
+
+# --- in direction: Blob → native memory --------------------------------------
+
+for @sizes -> $n {
+	my $src = Buf[uint8].new((^$n).map(&pattern));
+	my $got = native-copy-of($src);
+	my $ref = per-byte-write($src);
+
+	ok (^$n).map({ $got[$_] == $ref[$_] }).all.so,
+		"native-copy-of($n) is byte-identical to a per-byte write loop";
+
+	# Round-tripping back out proves both halves agree on length and
+	# offset, not just on content.
+	ok buf-from-native(nativecast(Pointer, $got), $n) eqv $src,
+		"native-copy-of($n) round-trips through buf-from-native";
+
+	$got.so;
+	$ref.so;
+}
+
+# .bytes, not .elems: a utf8 Blob's element count happens to equal its
+# byte count, but the distinction is what makes the helper total.
+my $u8 = "héllo wörld — ünïcøde".encode;
+my $u8-copy = native-copy-of($u8);
+ok buf-from-native(nativecast(Pointer, $u8-copy), $u8.bytes) eqv Buf[uint8].new($u8),
+	'native-copy-of copies a utf8 Blob byte-exactly';
+$u8-copy.so;
+
+# --- end-to-end: decode-to-rgba against the old copy mechanism ---------------
+#
+# Re-implements _rgba-from-vips's pipeline here (colourspace → sRGB,
+# addalpha when needed, write_to_memory) and pulls the pixels out with
+# the per-byte loop. decode-to-rgba must agree byte for byte, width
+# and height included — this is the real proof, on real decoded
+# pixels, that swapping the copy mechanism changed nothing observable.
+
+sub reference-decode(Str $path) {
+	my VipsImage $loaded = vips_image_new_from_file($path, Str);
+	die "reference-decode: could not load $path" without $loaded;
+
+	my $cs = CArray[VipsImage].new;
+	$cs[0] = VipsImage;
+	die "reference-decode: vips_colourspace failed"
+		if vips_colourspace($loaded, $cs, VIPS_INTERPRETATION_sRGB) != 0;
+	my VipsImage $srgb = $cs[0];
+
+	my VipsImage $rgba-img;
+	my $added-handle;
+	if vips_image_get_bands($srgb) < 4 {
+		my $aa = CArray[VipsImage].new;
+		$aa[0] = VipsImage;
+		die "reference-decode: vips_addalpha failed" if vips_addalpha($srgb, $aa) != 0;
+		$rgba-img     = $aa[0];
+		$added-handle = $rgba-img;
+	}
+	else {
+		$rgba-img = $srgb;
+	}
+
+	my $w = vips_image_get_width($rgba-img);
+	my $h = vips_image_get_height($rgba-img);
+
+	my $size-out = CArray[uint64].new;
+	$size-out[0] = 0;
+	my $ptr = vips_image_write_to_memory($rgba-img, $size-out);
+	die "reference-decode: vips_image_write_to_memory returned NULL" without $ptr;
+
+	my $out = per-byte-read($ptr, $size-out[0].Int);
+
+	vips_shim_free($ptr);
+	g_object_unref($added-handle) with $added-handle;
+	g_object_unref($srgb);
+	g_object_unref($loaded);
+
+	($w, $h, $out);
+}
+
+for CAMELIA, ALPHA, RGB -> $fixture {
+	my ($w, $h, $want) = reference-decode($fixture);
+	my $got = decode-to-rgba($fixture.IO);
+
+	is $got.width,  $w, "$fixture: decode-to-rgba width matches the reference";
+	is $got.height, $h, "$fixture: decode-to-rgba height matches the reference";
+	ok $got.rgba eqv $want,
+		"$fixture: decode-to-rgba pixels are byte-identical to a per-byte copy";
+
+	# Blob form runs the encoded bytes through native-copy-of on the
+	# way in, so it exercises the other direction end-to-end.
+	my $blob-got = decode-to-rgba($fixture.IO.slurp(:bin));
+	ok $blob-got.rgba eqv $want,
+		"$fixture: decode-to-rgba(Blob) pixels are byte-identical too";
+}
+
+# letterbox-to-buffer and smart-resize-buffer copy through the same
+# helper; check their lengths and PNG framing still hold and that the
+# result is stable across calls (a short/over-long memcpy would show
+# up as a truncated buffer or trailing zeros).
+my $lb = letterbox-to-buffer(CAMELIA.IO, :size(64));
+is $lb.bytes, 64 * 64 * 3, 'letterbox-to-buffer still returns size×size×3 bytes';
+ok $lb eqv letterbox-to-buffer(CAMELIA.IO, :size(64)),
+	'letterbox-to-buffer is byte-stable across calls';
+ok $lb.List.grep(* > 0).elems > 0, 'letterbox-to-buffer buffer is not all zeros';
+
+my $png = smart-resize-buffer(CAMELIA.IO.slurp(:bin), 32, 32);
+is $png[0 .. 7].List, (137, 80, 78, 71, 13, 10, 26, 10).List,
+	'smart-resize-buffer output still starts with the full PNG signature';
+# "IEND" + its CRC, which is the fixed 0xAE426082 for an empty chunk.
+# A memcpy that ran short would lop this off; one that ran long would
+# leave the allocate()-zeroed tail here instead.
+is $png.subbuf(* - 8).List, (73, 69, 78, 68, 174, 66, 96, 130).List,
+	'smart-resize-buffer output ends with a complete IEND chunk (no truncation)';
+
+# --- zero-length input must not corrupt the heap ----------------------------
+#
+# Regression: native-copy-of sized its CArray with .allocate($n) for
+# every $n, and Rakudo implements allocate as a bind to index $n - 1.
+# A zero-byte Blob therefore bound index -1 and wrote one byte before
+# the array's storage. Nothing was observable at the callsite; the
+# Windows heap checker aborted the process (0xC0000374) at some later,
+# unrelated free. Churn the allocator hard enough after the empty
+# copies that a repeat of the underflow is caught here, in this file,
+# rather than in whichever consumer next frees a neighbouring block.
+
+{
+	my $empty = native-copy-of(Buf[uint8].new);
+	is $empty.elems, 0, 'native-copy-of of an empty Blob has zero elements';
+	ok nativecast(Pointer, $empty).defined,
+		'native-copy-of of an empty Blob still yields a non-NULL pointer';
+
+	my $survived = True;
+	for ^4000 -> $i {
+		my $ca   = native-copy-of(Buf[uint8].new);
+		my $junk = Buf[uint8].new((^($i % 300)).map({ $_ % 256 }));
+		$survived &&= $ca.elems == 0 && $junk.bytes == $i % 300;
+	}
+	ok $survived, 'allocator churn after empty native-copy-of calls does not abort';
+}
+
+# --- input validation ---------------------------------------------------------
+#
+# The helpers are length-driven off .bytes, so a Blob whose elements
+# are wider than a byte would decode as raw native-endian memory
+# rather than as image data. Reject it at the boundary instead.
+
+nok decode-to-rgba(Blob[uint32].new(0x474E5089, 1, 2, 3)).so,
+	'decode-to-rgba rejects a Blob with elements wider than a byte';
+nok smart-resize-buffer(Blob[uint32].new(0x474E5089, 1, 2, 3), 8, 8).so,
+	'smart-resize-buffer rejects a Blob with elements wider than a byte';
+
+done-testing;

@@ -31,8 +31,8 @@ constant RGB     = 't/fixtures/rgb-solid.png';
 plan 24;
 
 sub px($img, Int $x, Int $y) {
-    my $i = ($y * $img.width + $x) * 4;
-    $img.rgba[$i .. $i + 3].List;
+	my $i = ($y * $img.width + $x) * 4;
+	$img.rgba[$i .. $i + 3].List;
 }
 
 # 1-4: Blob decode of camelia -------------------------------------------------
@@ -50,7 +50,7 @@ my $cam-file = decode-to-rgba(CAMELIA.IO);
 is $cam-file.width,  512, 'path decode width matches';
 is $cam-file.height, 385, 'path decode height matches';
 ok $cam.rgba eqv $cam-file.rgba,
-    'Blob and IO::Path decode of the same image yield identical pixels';
+	'Blob and IO::Path decode of the same image yield identical pixels';
 
 # 8: real pixels came through (not an all-zero buffer) ------------------------
 
@@ -62,7 +62,7 @@ my $a = decode-to-rgba(ALPHA.IO.slurp(:bin));
 is $a.width,  8, 'alpha-split width (8)';
 is $a.height, 8, 'alpha-split height (8)';
 is-deeply px($a, 0, 0), (255, 0, 0, 0).List,
-    'transparent pixel keeps alpha 0 (not composited to opaque)';
+	'transparent pixel keeps alpha 0 (not composited to opaque)';
 is-deeply px($a, 3, 4), (255, 0, 0, 0).List, 'transparent region stays transparent';
 is-deeply px($a, 7, 7), (0, 255, 0, 255).List, 'opaque green pixel intact';
 
@@ -72,7 +72,7 @@ my $rgb = decode-to-rgba(RGB.IO.slurp(:bin));
 is $rgb.rgba.bytes, 6 * 4 * 4, '3-band source decodes to 4-band (w×h×4 bytes)';
 is-deeply px($rgb, 0, 0), (0, 0, 255, 255).List, 'RGB pixel gains opaque alpha 255';
 ok (^($rgb.width * $rgb.height)).map({ $rgb.rgba[$_ * 4 + 3] }).all == 255,
-    'every added alpha byte is 255 (fully opaque)';
+	'every added alpha byte is 255 (fully opaque)';
 
 # 17-19: decode failure modes -------------------------------------------------
 
@@ -87,7 +87,7 @@ isa-ok $thumb, Buf, 'smart-resize-buffer returns a Buf';
 is $thumb[0 .. 3].List, (137, 80, 78, 71).List, 'output is a PNG (magic bytes)';
 my $thumb-img = decode-to-rgba($thumb);
 ok $thumb-img.width == 100 && $thumb-img.height == 100,
-    'resized PNG decodes to the requested 100×100';
+	'resized PNG decodes to the requested 100×100';
 
 # 23: a second size, to prove the dimension is honoured ----------------------
 

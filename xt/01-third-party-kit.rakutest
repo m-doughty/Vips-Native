@@ -1,0 +1,561 @@
+use Test;
+
+# End-to-end checks of scripts/ci/third-party.py, the script every release
+# lane runs over its bundle to write the notices kit (THIRD-PARTY.md +
+# LICENSES/) and to refuse a bundle it cannot account for. It runs here
+# against a mock conda-forge environment (the macOS and Linux lanes) and a
+# mock build-win64-mxe release with a licence-text manifest (the Windows
+# lanes), once as each lane would see it, and once for each way a lane must
+# stop: copyleft the README does not disclose, a package with no licence
+# text, a copyleft package with no source archive and SHA-256, a vendored
+# NOTICE for another version, a FreeType release with no credit year, a
+# librsvg without its crate list, a bundled file nothing installed; and a
+# manifest that is missing a component, lists one this script does not
+# know, lists one for the other architecture only, disagrees with the
+# release's versions.json, was collected for another release, names a text
+# whose bytes do not match, gives a built-in component the wrong host, or
+# whose libvips licence is not the release zip's.
+#
+# Why xt/ and not t/: the script needs python3, which an end user's
+# `zef install` -- on Windows in particular, where t/ runs too -- does not
+# have, and which no part of the installed module uses. The script only
+# ever runs in CI; this is the way to exercise it without a CI run. t/12
+# checks the disclosure list it reads against the README, on every
+# install. A missing python3 fails this file loudly rather than skipping
+# it; VIPS_NATIVE_PYTHON names another interpreter.
+#
+# The mock libraries are empty files: the script reads names, links and
+# conda's records, never a library's bytes. The mock conda environment
+# needs symbolic links, as a real one has.
+
+# Build.rakumod is the dist's `build:` script, not a module in `provides`;
+# EVALFILE'd for Build::remove-tree, as t/10 and t/11 do.
+BEGIN EVALFILE $*PROGRAM.parent.parent.child('Build.rakumod').absolute;
+
+plan 4;
+
+my IO::Path $dist   = $*PROGRAM.parent.parent;
+my IO::Path $script = $dist.add('scripts').add('ci').add('third-party.py');
+my IO::Path $texts  = $dist.add('scripts').add('ci').add('license-texts');
+my Str $python = %*ENV<VIPS_NATIVE_PYTHON> // 'python3';
+
+my IO::Path $root = $*TMPDIR.add("vips-native-third-party-kit-{$*PID}-{now.Int}");
+$root.mkdir;
+END { Build::remove-tree($root) if $root.e }
+
+my constant $SHA = 'ab' x 32;
+my constant $LERC-SOURCE = ('https://github.com/Esri/lerc/archive/v4.2.0.tar.gz',
+	'a1fb593ed1fcb5b38800caf3c4454f872745202e961d00d745e53d81447e17c9');
+my constant $FREETYPE-SOURCE = ('https://download.savannah.gnu.org/releases/freetype/freetype-2.14.3.tar.gz',
+	'e61b31ab26358b946e767ed7eb7f4bb2e507da1cfefeb7a8861ace7fd5c899a1');
+
+#| Run third-party.py (or the copy at $with); (exit code, stdout, stderr).
+sub kit(*@args, IO::Path :$with = $script --> List) {
+	my $proc = run $python, '-I', '-B', $with.absolute, |@args, :out, :err;
+	my Str $out = $proc.out.slurp(:close);
+	my Str $err = $proc.err.slurp(:close);
+	die "could not run $python ($err) -- install python3 or set VIPS_NATIVE_PYTHON"
+		if $proc.exitcode == -1 || $err.contains('command not found');
+	($proc.exitcode, $out, $err);
+}
+
+sub json(*%h --> Str) { Rakudo::Internals::JSON.to-json(%h) }
+
+sub sha256(IO::Path $file --> Str) {
+	# Asked of python, the one tool this file already needs: a stock
+	# Rakudo carries no SHA-256.
+	my $proc = run $python, '-I', '-c',
+		'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())',
+		$file.absolute, :out;
+	$proc.out.slurp(:close).trim;
+}
+
+#| Every line of $doc that starts with $start.
+sub lines-starting(Str $doc, Str $start --> List) {
+	$doc.lines.grep(*.starts-with($start)).List;
+}
+
+#| The text of the "## $name" section of $doc.
+sub section(Str $doc, Str $name --> Str) {
+	my $from = $doc.index("\n## $name\n");
+	return '' without $from;
+	my $to = $doc.index("\n## ", $from + 1) // $doc.chars;
+	$doc.substr($from, $to - $from);
+}
+
+# --- a mock conda environment --------------------------------------------
+
+# A cargo-about THIRDPARTY.yml, as conda-forge's librsvg carries one.
+my constant $THIRDPARTY-YML = q:to/YML/;
+	root_name: librsvg
+	third_party_libraries:
+	- package_name: adler2
+	  package_version: 2.0.1
+	  license: 0BSD OR MIT OR Apache-2.0
+	- package_name: cssparser
+	  package_version: 0.35.0
+	  license: MPL-2.0
+	- package_name: selectors
+	  package_version: 0.31.0
+	  license: MPL-2.0
+	YML
+
+#| The packages of the mock environment. files: what each installed under
+#| lib/ (name => link target for a link); texts: its info/licenses/ (name,
+#| or name => content); remote: its feedstock build (siblings share one);
+#| source: the url and sha256 its recipe names (default: example.org, $SHA);
+#| nosha: its recipe gives no sha256. Lerc and FreeType are built from their
+#| real source archives, which the texts kept for them were taken from.
+sub conda-packages(*%override --> Hash) {
+	my %p =
+		libvips => { version => '8.18.7', build => 'h0_0', license => 'LGPL-2.1-or-later',
+			files => ['libvips.42.dylib'], texts => ['LICENSE'] },
+		fftw => { version => '3.3.11', build => 'h0_0', license => 'GPL-2.0-or-later',
+			files => ['libfftw3.3.dylib'], texts => ['COPYING'] },
+		# The link, as conda-forge's _openmp_mutex installs it on Linux, and
+		# the library it leads to, installed by libgomp.
+		_openmp_mutex => { version => '4.5', build => '20_gnu', license => 'BSD-3-Clause',
+			files => ['libgomp.so.1' => 'libgomp.so.1.0.0'], texts => ['LICENSE'] },
+		libgomp => { version => '16.2.0', build => 'h0_7',
+			license => 'GPL-3.0-only WITH GCC-exception-3.1',
+			files => ['libgomp.so.1.0.0'], texts => [] },
+		lerc => { version => '4.2.0', build => 'h0_0', license => 'Apache-2.0',
+			files => ['libLerc.4.dylib'], texts => ['LICENSE'], source => $LERC-SOURCE },
+		libsqlite => { version => '3.54.1', build => 'h0_0', license => 'blessing',
+			files => ['libsqlite3.dylib'], texts => [] },
+		nss => { version => '3.118', build => 'h0_0', license => 'MPL-2.0',
+			files => ['libnss3.dylib'], texts => ['nss/COPYING'] },
+		# A split output with no licence text of its own, and the sibling
+		# output of the same feedstock build that has it.
+		libfreetype6 => { version => '2.14.3', build => 'h0_2', license => 'GPL-2.0-only OR FTL',
+			files => ['libfreetype.6.dylib'], texts => [], remote => 'freetype',
+			source => $FREETYPE-SOURCE },
+		freetype => { version => '2.14.3', build => 'h0_2', license => 'GPL-2.0-only OR FTL',
+			files => [], texts => ['docs/FTL.TXT', 'docs/GPLv2.TXT'], remote => 'freetype' },
+		librsvg => { version => '2.62.4', build => 'h0_0', license => 'LGPL-2.1-or-later',
+			files => ['librsvg-2.2.dylib'], texts => ['COPYING.LIB', 'THIRDPARTY.yml' => $THIRDPARTY-YML] },
+		fribidi => { version => '1.0.17', build => 'h0_0', license => 'LGPL-2.1-or-later',
+			files => ['libfribidi.0.dylib'], texts => ['COPYING'] },
+		libjpeg-turbo => { version => '3.2.0', build => 'h0_0', license => 'IJG AND BSD-3-Clause AND Zlib',
+			files => ['libjpeg.8.dylib'], texts => ['LICENSE.md'] },
+	;
+	%p{.key} = .value for %override;
+	%p;
+}
+
+my %MACOS-DISCLOSED = platforms => { macos-arm64 => { readme => 'macOS arm64', packages => {
+	libvips => 'libvips', fftw => 'FFTW', libgomp => 'libgomp', nss => 'NSS',
+	libfreetype6 => 'FreeType', librsvg => 'librsvg', fribidi => 'fribidi' } } };
+
+#| A mock environment, package cache and bundle under $root/$name; the
+#| bundle holds every library file of %packages, the shim, and a link.
+sub conda-fixture(Str $name, %packages, :@extra-bundle --> IO::Path) {
+	my IO::Path $dir = $root.add($name);
+	my IO::Path $prefix = $dir.add('prefix');
+	my IO::Path $pkgs = $dir.add('pkgs');
+	my IO::Path $bundle = $dir.add('bundle');
+	.mkdir for $prefix.add('conda-meta'), $prefix.add('lib'), $bundle;
+	for %packages.sort(*.key) -> (:key($pkg), :value(%p)) {
+		my Str $stem = "$pkg-{%p<version>}-{%p<build>}";
+		my IO::Path $info = $pkgs.add($stem).add('info');
+		$info.add('licenses').mkdir;
+		$info.add('recipe').mkdir;
+		for |%p<texts> -> $t {
+			my ($tname, $content) = $t ~~ Pair ?? ($t.key, $t.value) !! ($t, "$pkg licence text $t\n");
+			$info.add('licenses').add($tname).parent.mkdir;
+			$info.add('licenses').add($tname).spurt($content);
+		}
+		my ($url, $sha) = %p<source> // ("https://example.org/$pkg-{%p<version>}.tar.gz", $SHA);
+		$info.add('recipe').add('meta.yaml').spurt(
+			"package:\n  name: $pkg\nsource:\n  url: $url\n"
+			~ (%p<nosha> ?? '' !! "  sha256: $sha\n") ~ "build:\n  number: 0\n");
+		my Str $remote = %p<remote> // $pkg;
+		$info.add('about.json').spurt(json(home => "https://example.org/$pkg",
+			extra => { remote_url => "https://github.com/conda-forge/{$remote}-feedstock",
+				sha => '0123456789abcdef0123456789abcdef01234567' }));
+		my @files;
+		for |%p<files> -> $f {
+			if $f ~~ Pair {
+				symlink($f.value, $prefix.add('lib').add($f.key).absolute, :!absolute);
+				@files.push: "lib/{$f.key}";
+			}
+			else {
+				$prefix.add('lib').add($f).spurt('');
+				@files.push: "lib/$f";
+			}
+		}
+		$prefix.add('conda-meta').add("$stem.json").spurt(json(
+			name => $pkg, version => %p<version>, build => %p<build>, license => %p<license>,
+			subdir => 'osx-arm64', files => @files,
+			url => "https://conda.anaconda.org/conda-forge/osx-arm64/$stem.conda",
+			extracted_package_dir => $pkgs.add($stem).absolute));
+		# The bundlers copy each library to the bundle's top level under
+		# the name it was asked for; links become the file they lead to.
+		for |%p<files> -> $f {
+			$bundle.add($f ~~ Pair ?? $f.key !! $f).spurt('')
+				unless $f ~~ Str && $f eq 'libgomp.so.1.0.0';
+		}
+	}
+	$bundle.add('libvips_shim.dylib').spurt('');
+	$bundle.add('libvips_shim.dylib.srchash').spurt('0' x 64 ~ "\n");
+	$bundle.add($_).spurt('') for @extra-bundle;
+	symlink('libvips.42.dylib', $bundle.add('libvips.dylib').absolute, :!absolute);
+	$dir;
+}
+
+sub conda-kit(IO::Path $dir, %disclosed = %MACOS-DISCLOSED,
+		Str :$pack = 'vips-macos-arm64.tar.gz', IO::Path :$with = $script --> List) {
+	$dir.add('disclosed.json').spurt(json(|%disclosed));
+	kit :$with, 'conda', '--prefix', $dir.add('prefix').absolute, '--bundle', $dir.add('bundle').absolute,
+		'--pack', $pack, '--tag', 'binaries-vips-8.18.7-r99',
+		'--spec', 'libvips==8.18.7=h0_0', '--pkgs-dir', $dir.add('pkgs').absolute,
+		'--disclosed', $dir.add('disclosed.json').absolute;
+}
+
+subtest 'conda: a bundle every file of which a package accounts for' => {
+	plan 20;
+	my IO::Path $dir = conda-fixture('conda-ok', conda-packages());
+	my ($code, $out, $err) = conda-kit($dir);
+	is $code, 0, 'the kit is written' or diag $err;
+	my IO::Path $bundle = $dir.add('bundle');
+	my Str $doc = $bundle.add('THIRD-PARTY.md').slurp;
+	my Str $sources = section($doc, 'Where to get the source');
+	my Str $acks = section($doc, 'Acknowledgements');
+
+	ok lines-starting($doc, '| libgomp | 16.2.0 | h0_7 |').head.contains('`libgomp.so.1`'),
+		'libgomp.so.1, reached through _openmp_mutex\'s link, is credited to libgomp';
+	ok $doc.contains('| `libgomp.so.1` | libgomp 16.2.0 (`lib/libgomp.so.1.0.0`, reached through the link `lib/libgomp.so.1`) |'),
+		'and the file list says which file and which link';
+	nok lines-starting($doc, '| _openmp_mutex |'), 'the package of the link is credited with nothing';
+	ok $bundle.add('LICENSES/libgomp/GPL-3.0.txt').f && $bundle.add('LICENSES/libgomp/GCC-exception-3.1.txt').f,
+		'libgomp ships the GPL-3.0 and GCC exception texts its package lacks';
+	nok $bundle.add('LICENSES/_openmp_mutex').e, 'and no texts for the link\'s package';
+	is $bundle.add('LICENSES/lerc/NOTICE').slurp(:bin),
+		$texts.add('lerc-4.2.0').add('NOTICE').slurp(:bin),
+		'Lerc ships its NOTICE, byte for byte the vendored one';
+	ok <bdf pcf>.map({
+			$bundle.add("LICENSES/libfreetype6/src/$_/README").slurp(:bin)
+				eq $texts.add("freetype-2.14.3/src/$_/README").slurp(:bin)
+		}).all.so && lines-starting($doc, '**Texts the conda packages lack.**').head
+			.contains('BDF and PCF font drivers'),
+		'FreeType ships its BDF and PCF drivers\' notices, byte for byte the vendored ones';
+	ok lines-starting($doc, '**Weak (file-level) copyleft').head.contains('nss (MPL-2.0)'),
+		'MPL-2.0 is called out as weak copyleft';
+	ok lines-starting($doc, '**No licence text needed.**').head.contains('libsqlite (declared licence: blessing)'),
+		'a public-domain package ships without a text, and says why';
+	ok lines-starting($doc, '| libfreetype6 | 2.14.3 | h0_2 |').head.contains('(from freetype, built by the same feedstock commit)'),
+		'a split output takes its texts from its sibling';
+	ok lines-starting($doc, '**GPL with the GCC Runtime Library Exception**').head.contains('libgomp'),
+		'the GCC runtime is called out';
+	ok $acks.contains('Portions of this software are copyright © 2026 The FreeType Project (https://freetype.org). All rights reserved. (libfreetype6)'),
+		'FreeType\'s credit, with its release\'s year';
+	ok $acks.contains('based in part on the work of the Independent JPEG Group. (libjpeg-turbo)'),
+		'the IJG\'s';
+	ok $acks.contains('compiled into FriBidi') && $bundle.add('LICENSES/Unicode-3.0.txt').slurp(:bin)
+		eq $texts.add('Unicode-3.0.txt').slurp(:bin), 'the Unicode licence, for FriBidi\'s tables';
+	ok lines-starting($sources, '| nss | 3.118 | MPL-2.0 | <https://example.org/nss-3.118.tar.gz><br>sha256 `' ~ $SHA ~ '`'),
+		'the source of an MPL package, with its SHA-256' or diag $sources;
+	ok lines-starting($sources, '| libgomp | 16.2.0 |').head.contains('[recipe](https://github.com/conda-forge/libgomp-feedstock/tree/'),
+		'and of the GCC runtime, with the recipe at its commit';
+	nok lines-starting($sources, '| lerc |'), 'not of a permissive one';
+	ok $sources.contains('[cssparser 0.35.0](https://crates.io/crates/cssparser/0.35.0), [selectors 0.31.0](https://crates.io/crates/selectors/0.31.0)'),
+		'librsvg\'s MPL crates, from its THIRDPARTY.yml, on crates.io';
+	ok $out.contains('every copyleft package in the macos-arm64 pack is disclosed'),
+		'the disclosure check ran';
+};
+
+subtest 'conda: bundles that must stop a lane' => {
+	plan 24;
+	my %undisclosed = platforms => { macos-arm64 => { readme => 'macOS arm64', packages => {
+		libvips => 'libvips', fftw => 'FFTW', libgomp => 'libgomp', libfreetype6 => 'FreeType',
+		librsvg => 'librsvg', fribidi => 'fribidi' } } };
+	my IO::Path $dir = conda-fixture('conda-undisclosed', conda-packages());
+	my ($code, $, $err) = conda-kit($dir, %undisclosed);
+	is $code, 1, 'copyleft the disclosure list does not name';
+	ok $err.contains('nss (MPL-2.0, weak)'), 'says which, and why' or diag $err;
+	nok $dir.add('bundle/THIRD-PARTY.md').e, 'and writes nothing';
+
+	$dir = conda-fixture('conda-other-platform', conda-packages());
+	($code, $, $err) = conda-kit($dir, :pack<vips-linux-x86_64-glibc.tar.gz>);
+	is $code, 1, 'a platform the disclosure list does not know';
+	ok $err.contains('lists no platform linux-x86_64-glibc'), 'says so' or diag $err;
+
+	$dir = conda-fixture('conda-lerc-bump', conda-packages(lerc => { version => '4.3.0',
+		build => 'h0_0', license => 'Apache-2.0', files => ['libLerc.4.dylib'], texts => ['LICENSE'] }));
+	($code, $, $err) = conda-kit($dir);
+	is $code, 1, 'a Lerc other than the one its NOTICE was taken from';
+	ok $err.contains('lerc 4.3.0 is bundled, but the texts kept for it'), 'says to re-vendor them' or diag $err;
+
+	$dir = conda-fixture('conda-textless', conda-packages(libfoo => { version => '1.0',
+		build => 'h0_0', license => 'MIT', files => ['libfoo.1.dylib'], texts => [] }));
+	($code, $, $err) = conda-kit($dir);
+	is $code, 1, 'a package with no licence text that is not public domain';
+	ok $err.contains('no licence text for libfoo (declared licence: MIT)'), 'names it' or diag $err;
+
+	$dir = conda-fixture('conda-no-sha', conda-packages(fftw => { version => '3.3.11',
+		build => 'h0_0', license => 'GPL-2.0-or-later', files => ['libfftw3.3.dylib'],
+		texts => ['COPYING'], nosha => True }));
+	($code, $, $err) = conda-kit($dir);
+	is $code, 1, 'a copyleft package whose source has no SHA-256';
+	ok $err.contains('no source archive with a SHA-256 for fftw'), 'names it' or diag $err;
+
+	$dir = conda-fixture('conda-freetype-bump', conda-packages(libfreetype6 => { version => '2.15.0',
+		build => 'h0_0', license => 'GPL-2.0-only OR FTL', files => ['libfreetype.6.dylib'],
+		texts => ['docs/FTL.TXT'] }));
+	($code, $, $err) = conda-kit($dir);
+	is $code, 1, 'a FreeType whose credit year is not known';
+	ok $err.contains('FreeType 2.15.0 is bundled, and FREETYPE_YEARS'), 'says so' or diag $err;
+
+	$dir = conda-fixture('conda-no-crate-list', conda-packages(librsvg => { version => '2.62.4',
+		build => 'h0_0', license => 'LGPL-2.1-or-later', files => ['librsvg-2.2.dylib'],
+		texts => ['COPYING.LIB'] }));
+	($code, $, $err) = conda-kit($dir);
+	is $code, 1, 'a librsvg without the list of the crates in it';
+	ok $err.contains('librsvg is bundled without the THIRDPARTY.yml'), 'says so' or diag $err;
+
+	$dir = conda-fixture('conda-other-archive', conda-packages(libfreetype6 => { version => '2.14.3',
+		build => 'h0_2', license => 'GPL-2.0-only OR FTL', files => ['libfreetype.6.dylib'],
+		texts => [], remote => 'freetype' }));
+	($code, $, $err) = conda-kit($dir);
+	is $code, 1, 'a FreeType built from another source archive than its kept texts came from';
+	ok $err.contains('libfreetype6 2.14.3 was built from a source archive other than'),
+		'says so' or diag $err;
+
+	# A copy of the script and its texts, to break a kept text in.
+	my IO::Path $repo = $root.add('repo');
+	sub copy-tree(IO::Path $from, IO::Path $to) {
+		$to.mkdir;
+		for $from.dir -> $e {
+			next if $e.basename eq 'windows';
+			$e.d ?? copy-tree($e, $to.add($e.basename)) !! $e.copy($to.add($e.basename));
+		}
+	}
+	copy-tree($texts, $repo.add('scripts/ci/license-texts'));
+	$script.copy($repo.add('scripts/ci/third-party.py'));
+	$dist.add('LICENSE').copy($repo.add('LICENSE'));
+	my IO::Path $bdf = $repo.add('scripts/ci/license-texts/freetype-2.14.3/src/bdf/README');
+	$bdf.spurt($bdf.slurp ~ "an added line\n");
+	$dir = conda-fixture('conda-edited-text', conda-packages());
+	($code, $, $err) = conda-kit($dir, with => $repo.add('scripts/ci/third-party.py'));
+	is $code, 1, 'a kept text whose bytes are not the pinned ones';
+	ok $err.contains('freetype-2.14.3/src/bdf/README hashes to'), 'names it' or diag $err;
+	$bdf.unlink;
+	$dir = conda-fixture('conda-missing-text', conda-packages());
+	($code, $, $err) = conda-kit($dir, with => $repo.add('scripts/ci/third-party.py'));
+	is $code, 1, 'a kept text that is missing';
+	ok $err.contains('src/bdf/README of https://download.savannah.gnu.org/releases/freetype/freetype-2.14.3.tar.gz) is missing'),
+		'names it' or diag $err;
+
+	$dir = conda-fixture('conda-stray', conda-packages(), extra-bundle => ['libstray.dylib']);
+	($code, $, $err) = conda-kit($dir);
+	is $code, 1, 'a bundled file no package installed';
+	ok $err.contains('libstray.dylib: no package'), 'names it' or diag $err;
+	nok $dir.add('bundle/THIRD-PARTY.md').e, 'and writes nothing';
+};
+
+# --- a mock build-win64-mxe release ----------------------------------------
+
+my constant $ZIP-LICENCE = "libvips licence, as the release zip has it\n";
+my constant $MPL-TEXT = "Mozilla Public License Version 2.0\r\n==================================\r\n";
+
+my %VERSIONS = vips => '8.18.7', glib => '2.90.0', fftw => '3.3.11', zstd => '1.5.7',
+	sqlite => '3530400', proxy-libintl => '0.5', freetype => '2.14.3', rsvg => '2.63.2';
+
+my @DLLS = <libvips-42.dll vips-modules-8.18/vips-poppler.dll libglib-2.0-0.dll
+	libfftw3-3.dll libzstd.dll libsqlite3-0.dll libc++.dll libunwind.dll libfreetype-6.dll
+	librsvg-2-2.dll>;
+
+#| The manifest's components: key => (spdx, platforms, texts, notes). A
+#| text is a name, or name => content.
+sub mxe-components(*%override --> Hash) {
+	my %c =
+		vips => ('LGPL-2.1-or-later', <x86_64 arm64>, ['LICENSE' => $ZIP-LICENCE], ''),
+		glib => ('LGPL-2.1-or-later', <x86_64 arm64>, ['COPYING'], ''),
+		fftw => ('GPL-2.0-or-later', <x86_64 arm64>, ['COPYING'], ''),
+		zstd => ('BSD-3-Clause OR GPL-2.0-only', <x86_64 arm64>, ['LICENSE', 'COPYING'], ''),
+		sqlite => ('blessing', <x86_64 arm64>, [], 'In the public domain; ships no licence file.'),
+		freetype => ('(FTL OR GPL-2.0-or-later) AND MIT', <x86_64 arm64>, ['docs/FTL.TXT'], ''),
+		rsvg => ('LGPL-2.1-or-later', <x86_64 arm64>, ['COPYING.LIB'], ''),
+		llvm-runtime => ('Apache-2.0 WITH LLVM-exception', <x86_64 arm64>,
+			['libcxx/LICENSE.TXT', 'compiler-rt/LICENSE.TXT'], ''),
+		mingw-w64 => ('ZPL-2.1', <x86_64 arm64>, ['COPYING.MinGW-w64-runtime/COPYING.MinGW-w64-runtime.txt'],
+			'Statically linked into: every DLL (the CRT startup code).'),
+		proxy-libintl => ('LGPL-2.0-or-later', <x86_64 arm64>, ['COPYING'],
+			'Statically linked into: glib (substituted for gettext).'),
+		rsvg-crates => ('MIT AND MPL-2.0', <x86_64 arm64>,
+			['crates/cssparser-0.37.0/LICENSE' => $MPL-TEXT, 'crates/adler2-2.0.1/LICENSE-MIT'],
+			'Statically linked into: rsvg; no mxe() key. MPL crates: cssparser 0.37.0, '
+			~ 'selectors 0.40.0, each at https://crates.io/crates/<name>/<version>.'),
+		rust-std => ('MIT OR Apache-2.0', <x86_64 arm64>, ['LICENSE-MIT'],
+			'Statically linked into: rsvg (built with -Zbuild-std).'),
+		# Its host, openexr, is not in this release: it must not ship.
+		imath => ('BSD-3-Clause', <x86_64 arm64>, ['LICENSE.md'],
+			'Statically linked into: openexr (a static Imath).'),
+	;
+	%c{.key} = .value for %override;
+	%c;
+}
+
+# (Explicit %(): a brace block that mentions $_ is a Block, not a Hash.)
+my %WINDOWS-DISCLOSED = platforms => <windows-x86_64 windows-arm64>.map(-> $platform {
+	$platform => %(readme => $platform.subst('windows-', 'Windows '), packages => %(
+		vips => 'libvips', glib => 'GLib', fftw => 'FFTW', zstd => 'zstd', freetype => 'FreeType',
+		rsvg => 'librsvg', proxy-libintl => 'proxy-libintl', rsvg-crates => 'Rust crates')) }).Hash;
+
+#| The zip root, bundle and manifest (with its texts) under $root/$name.
+#| &tamper gets the manifest's components hash and its directory before
+#| the manifest is written.
+sub mxe-fixture(Str $name, %components, :&tamper, :$ref = 'v8.18.7' --> IO::Path) {
+	my IO::Path $dir = $root.add($name);
+	my IO::Path $zip = $dir.add('vips-dev-8.18');
+	my IO::Path $bundle = $dir.add('bundle');
+	my IO::Path $man = $dir.add('windows');
+	.mkdir for $zip, $bundle.add('vips-modules-8.18'), $man;
+	$zip.add('versions.json').spurt(json(|%VERSIONS));
+	$zip.add('LICENSE').spurt($ZIP-LICENCE);
+	$bundle.add($_).spurt('') for |@DLLS, 'libvips_shim.dll', 'libvips_shim.dll.srchash';
+	my %out;
+	for %components.sort(*.key) -> (:key($k), :value(@v)) {
+		my ($spdx, $platforms, $files, $notes) = @v;
+		my @files;
+		for |$files -> $f {
+			my ($fname, $content) = $f ~~ Pair ?? ($f.key, $f.value)
+				!! ($f, "$k licence text $f\r\nwith a CRLF line\r\n");
+			my IO::Path $t = $man.add($k).add($fname);
+			$t.parent.mkdir;
+			$t.spurt($content);
+			@files.push: { name => $fname, path => "$k/$fname", sha256 => sha256($t), from => 'fixture' };
+		}
+		%out{$k} = { version => %VERSIONS{$k} // '1.0', spdx => $spdx,
+			source => { url => "https://example.org/$k.tar.gz", sha256 => 'cd' x 32 },
+			files => @files, platforms => [|$platforms], notes => $notes };
+	}
+	tamper(%out, $man) with &tamper;
+	$man.add('manifest.json').spurt(json(
+		recipe => { repo => 'https://github.com/libvips/build-win64-mxe', ref => $ref },
+		components => %out));
+	$dir;
+}
+
+sub mxe-kit(IO::Path $dir, %disclosed = %WINDOWS-DISCLOSED, Str :$manifest,
+		Str :$arch = 'x86_64' --> List) {
+	$dir.add('disclosed.json').spurt(json(|%disclosed));
+	kit 'mxe', '--zip-root', $dir.add('vips-dev-8.18').absolute,
+		'--zip-name', "vips-dev-{$arch eq 'x86_64' ?? 'x64' !! $arch}-all-8.18.7.zip",
+		'--release', 'v8.18.7',
+		'--bundle', $dir.add('bundle').absolute, '--pack', "vips-windows-$arch.zip",
+		'--tag', 'binaries-vips-8.18.7-r99',
+		'--license-manifest', $manifest // $dir.add('windows/manifest.json').absolute,
+		'--disclosed', $dir.add('disclosed.json').absolute;
+}
+
+subtest 'mxe: bundles the manifest covers' => {
+	plan 21;
+	my IO::Path $dir = mxe-fixture('mxe-ok', mxe-components());
+	my ($code, $out, $err) = mxe-kit($dir);
+	is $code, 0, 'the kit is written' or diag $err;
+	my IO::Path $lic = $dir.add('bundle/LICENSES');
+	my Str $doc = $dir.add('bundle/THIRD-PARTY.md').slurp;
+	my Str $sources = section($doc, 'Where to get the source');
+	is $lic.add('zstd/LICENSE').slurp(:bin), $dir.add('windows/zstd/LICENSE').slurp(:bin),
+		'each text is copied byte for byte, CRLF and all';
+	ok $lic.add('llvm-runtime/compiler-rt/LICENSE.TXT').f
+		&& $lic.add('rsvg-crates/crates/cssparser-0.37.0/LICENSE').f,
+		'a text whose name is a path keeps it, under LICENSES/<component>/';
+	ok $lic.add('mingw-w64/COPYING.MinGW-w64-runtime/COPYING.MinGW-w64-runtime.txt').f,
+		'the mingw-w64 runtime, built into every DLL, ships its notice';
+	ok $lic.add('proxy-libintl/COPYING').f && $lic.add('rsvg-crates').d && $lic.add('rust-std/LICENSE-MIT').f,
+		'components built into a DLL in the pack ship their texts';
+	nok $lic.add('imath').e, 'one whose host is not in the pack does not';
+	ok $lic.add('vips/LICENSE').f && !$lic.add('libvips').e,
+		'libvips\'s licence ships once, the manifest\'s copy (the zip\'s is the same)';
+	ok $lic.add('Vips-Native/GCC-exception-3.1.txt').f, 'x86_64: the GCC exception for our shim\'s libgcc';
+	ok lines-starting($doc, 'The shim is compiled').head.contains('UCRT64'), 'and the toolchain is named';
+	ok lines-starting(section($doc, 'Components'), '| zstd | 1.5.7 | BSD-3-Clause OR GPL-2.0-only |')
+		.head.contains('`LICENSES/zstd/COPYING`'),
+		'each component\'s licence, version and texts';
+	ok lines-starting(section($doc, 'Components'), '| sqlite | 3530400 | blessing |').head.contains('none: public domain, no licence text upstream'),
+		'a public-domain component with no text says so';
+	ok lines-starting($doc, '- **sqlite**:').head.contains('ships no licence file'), 'citing its notes';
+	ok section($doc, 'Components with no file of their own').contains('| proxy-libintl |'),
+		'built-in components are listed apart';
+	ok section($doc, 'Components').contains('| llvm-runtime |'), 'the LLVM runtime with its DLLs';
+	ok section($doc, 'Acknowledgements').contains('copyright © 2026 The FreeType Project'),
+		'FreeType\'s credit';
+	ok $lic.add('Unicode-3.0.txt').f && section($doc, 'Acknowledgements').contains('compiled into GLib'),
+		'the Unicode licence, for GLib\'s tables';
+	ok lines-starting($sources, '| proxy-libintl | 0.5 | LGPL-2.0-or-later | <https://example.org/proxy-libintl.tar.gz><br>sha256 `' ~ ('cd' x 32) ~ '`'),
+		'the source of a built-in LGPL component';
+	ok $sources.contains('[cssparser 0.37.0](https://crates.io/crates/cssparser/0.37.0), [selectors 0.40.0](https://crates.io/crates/selectors/0.40.0)'),
+		'the MPL crates, from their texts and their notes (selectors ships no licence file)';
+	ok lines-starting($doc, '**Dual-licensed, GPL or other.**').head.contains('zstd'), 'GPL-or-other is called out';
+
+	($code, $out, $err) = mxe-kit($dir, :arch<arm64>);
+	is $code, 0, 'the arm64 kit is written' or diag $err;
+	ok !$lic.add('Vips-Native/GCC-exception-3.1.txt').e
+		&& lines-starting($dir.add('bundle/THIRD-PARTY.md').slurp, 'The shim is compiled').head
+			.contains('CLANGARM64'), 'arm64: no libgcc, the CLANGARM64 toolchain and compiler-rt';
+};
+
+subtest 'mxe: manifests that must stop a lane' => {
+	plan 31;
+	sub refused(Str $name, Str $what, Str $says, %components = mxe-components(), :&tamper,
+			:$ref = 'v8.18.7', :%disclosed = %WINDOWS-DISCLOSED) {
+		my IO::Path $dir = mxe-fixture($name, %components, :&tamper, :$ref);
+		my ($code, $, $err) = mxe-kit($dir, %disclosed);
+		is $code, 1, $what;
+		ok $err.contains($says), "  and says: $says" or diag $err;
+		$dir;
+	}
+	my %c = mxe-components();
+	%c<glib>:delete;
+	my $dir = refused('mxe-missing', 'a bundled component the manifest does not list',
+		'glib (libglib-2.0-0.dll) is in the pack', %c);
+	nok $dir.add('bundle/THIRD-PARTY.md').e, 'and writes nothing';
+
+	%c = mxe-components();
+	%c<mingw-w64>:delete;
+	refused('mxe-no-mingw', 'no mingw-w64 runtime, which every DLL has',
+		'mingw-w64 is built into every DLL', %c);
+	refused('mxe-unknown', 'a component the script does not know',
+		'mystery is a component third-party.py does not know',
+		mxe-components(mystery => ('MIT', <x86_64 arm64>, ['LICENSE'], '')));
+	refused('mxe-wrong-host', 'a built-in component whose notes name another host',
+		'must say it is "Statically linked into: glib"',
+		mxe-components(proxy-libintl => ('LGPL-2.0-or-later', <x86_64 arm64>, ['COPYING'],
+			'Statically linked into: cairo.')));
+	refused('mxe-arch', 'a component listed for the other architecture only', 'lists it only for arm64',
+		mxe-components(fftw => ('GPL-2.0-or-later', <arm64>, ['COPYING'], '')));
+	refused('mxe-tampered', 'a text whose bytes do not match the manifest', 'glib: glib/COPYING hashes to',
+		tamper => -> %c, $man { $man.add('glib/COPYING').spurt("edited\n") });
+	refused('mxe-stale', 'a version the release\'s versions.json disagrees with', 'versions.json says 2.90.0',
+		tamper => -> %c, $man { %c<glib><version> = '2.88.0' });
+	refused('mxe-release', 'a manifest collected for another release', "collected for build-win64-mxe 'v8.18.6'",
+		:ref<v8.18.6>);
+	refused('mxe-undisclosed', 'copyleft the disclosure list does not name',
+		'zstd (BSD-3-Clause OR GPL-2.0-only, gpl-or)',
+		disclosed => { platforms => { windows-x86_64 => { readme => 'Windows x86_64', packages => {
+			vips => 'libvips', glib => 'GLib', fftw => 'FFTW', freetype => 'FreeType', rsvg => 'librsvg',
+			proxy-libintl => 'proxy-libintl', rsvg-crates => 'Rust crates' } } } });
+	refused('mxe-no-notes', 'a public-domain component with no text and no notes saying why',
+		'sqlite ships no licence text and gives no notes',
+		mxe-components(sqlite => ('blessing', <x86_64 arm64>, [], '')));
+	refused('mxe-textless', 'a component with no text that is not public domain',
+		'fftw ships no licence text, and its licence (GPL-2.0-or-later) is not a public-domain',
+		mxe-components(fftw => ('GPL-2.0-or-later', <x86_64 arm64>, [], 'none upstream')));
+	refused('mxe-escape', 'a text path leading out of the manifest\'s directory',
+		"path must be relative to the manifest's directory",
+		tamper => -> %c, $man { %c<glib><files>[0]<path> = '../escape/COPYING' });
+	refused('mxe-path', 'a text path that is not <component>/<name>', 'path pango/COPYING is not glib/COPYING',
+		tamper => -> %c, $man { %c<glib><files>[0]<path> = 'pango/COPYING' });
+	refused('mxe-zip-licence', 'a libvips licence that is not the release zip\'s',
+		'the release zip\'s LICENSE', tamper => -> %c, $man {
+			$man.add('vips/LICENSE').spurt("another libvips's licence\n");
+			%c<vips><files>[0]<sha256> = sha256($man.add('vips/LICENSE'));
+		});
+
+	$dir = mxe-fixture('mxe-no-manifest', mxe-components());
+	my ($code, $, $err) = mxe-kit($dir, :manifest($dir.add('nowhere/manifest.json').absolute));
+	is $code, 1, 'no manifest at all';
+	ok $err.contains('no licence-text manifest at'), '  and says so' or diag $err;
+};

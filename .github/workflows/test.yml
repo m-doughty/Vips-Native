@@ -13,6 +13,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        # 2026.07: last legacy-frontend release. 2026.09: RakuAST is the default.
+        raku-version: ['2026.07', '2026.09']
         include:
           - os: ubuntu-latest
             install-system-libvips: |
@@ -33,7 +36,7 @@ jobs:
 
       - uses: Raku/setup-raku@v1
         with:
-          raku-version: 'latest'
+          raku-version: ${{ matrix.raku-version }}
 
       # ---------------------------------------------------------
       # Prebuilt path: zef install runs Build.rakumod which
@@ -59,10 +62,16 @@ jobs:
       - name: Run unit tests — prebuilt path
         shell: bash
         env:
-          # Makes libvips and GLib chatty on stderr. Test output is
-          # mostly TAP on stdout, so the extra log lines don't break
-          # the plan parser. If a load fails, we get the real error
-          # instead of a silent NULL return.
+          # VIPS_INFO and G_MESSAGES_DEBUG make libvips and GLib chatty
+          # on stderr: if a load fails, the log says why instead of the
+          # test seeing a silent NULL return. Test output is TAP on
+          # stdout, so the extra lines don't break the plan parser.
+          # VIPS_WARNING does the opposite: set to anything, it SILENCES
+          # libvips's warnings (libvips reads it once, in vips_init), so
+          # this lane does not see them. The suite does not depend on it:
+          # t/09 sets it itself for the child process it decodes a
+          # corrupt PNG in, which keeps a plain `prove6` run's stderr
+          # empty.
           VIPS_WARNING: '1'
           VIPS_INFO: '1'
           G_MESSAGES_DEBUG: 'all'
@@ -86,11 +95,12 @@ jobs:
             say "vips-lib:       ", vips-lib();
             say "gobject-lib:    ", gobject-lib();
             say "shim-lib:       ", shim-lib() // "(none)";
-            say "VIPS_MODULEDIR: ", %*ENV<VIPS_MODULEDIR> // "(unset)";
+            say "VIPSHOME:       ", %*ENV<VIPSHOME> // "(unset)";
             say "GIO_MODULE_DIR: ", %*ENV<GIO_MODULE_DIR> // "(unset)";
           '
           echo "=== staged dir ==="
           ls -la "$HOME/.local/share/Vips-Native/"*/lib 2>&1 | head -80
+          ls -la "$HOME/.local/share/Vips-Native/"*/lib/vips-modules-* 2>&1 | head -20
           echo "=== codesign libvips.42.dylib ==="
           codesign -dvvv "$HOME"/.local/share/Vips-Native/*/lib/libvips.42.dylib 2>&1 || true
           echo "=== otool libvips.42.dylib ==="

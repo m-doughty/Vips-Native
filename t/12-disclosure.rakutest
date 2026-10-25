@@ -1,0 +1,134 @@
+use Test;
+
+# The README has to say what copyleft the prebuilt packs carry, platform by
+# platform, and say it truly: the packs are redistributions of other
+# people's GPL, LGPL and MPL code, and the README is where a user finds out
+# before installing one.
+#
+# scripts/ci/disclosed.json is the list both halves of that promise are held
+# to. When a pack is built, scripts/ci/third-party.py fails the build if the
+# pack carries a package or component whose declared licence is copyleft
+# (GPL, GPL-or-other, GPL with the GCC runtime exception, LGPL, MPL, EPL,
+# CDDL) that the list does not name for that platform. This file fails if
+# the README, or the Pod it is generated from, does not name every package
+# the list names, in the disclosure item for that platform under "Binary
+# distributions and licensing". Together: copyleft in a pack is in the list,
+# and what is in the list is in the README.
+#
+# JSON parsing goes through Rakudo::Internals::JSON rather than JSON::Fast so
+# this dist keeps its empty `depends` and `test-depends`. It is a builtin, so
+# there is no `use` for it.
+
+plan 6;
+
+my IO::Path $root     = $*PROGRAM.parent.parent;
+my IO::Path $list     = $root.add('scripts').add('ci').add('disclosed.json');
+my IO::Path $readme   = $root.add('README.md');
+my IO::Path $pod      = $root.add('doc').add('Readme.rakudoc');
+my IO::Path $checksum = $root.add('resources').add('checksums.txt');
+
+# Where, in either document, the disclosure items start and stop: after the
+# sentence that says the packs contain GPL code, before the paragraph about
+# the notices kit.
+my constant $FROM  = 'contain GPL-licensed code';
+my constant $UNTIL = 'Every pack carries';
+
+#| Whether $text names $name as a word of its own: "pango" is not named by
+#| "libpango", nor "GLib" by "GLibc".
+sub names(Str:D $text, Str:D $name --> Bool:D) {
+	so $text ~~ / <!after <[\w]>> $name <!before <[\w]>> /;
+}
+
+#| The text between the two markers, or a failure saying which is missing.
+sub disclosure-region(Str:D $doc, Str:D $what) {
+	my $from = $doc.index($FROM);
+	my $until = $from.defined ?? $doc.index($UNTIL, $from) !! Nil;
+	return fail "$what has no '$FROM'" without $from;
+	return fail "$what has no '$UNTIL' after '$FROM'" without $until;
+	$doc.substr($from, $until - $from);
+}
+
+#| The README's disclosure items: label => text, one per Markdown bullet.
+sub readme-items(Str:D $region --> List:D) {
+	my @items;
+	for $region.lines -> $line {
+		if $line ~~ / ^ \s* '*' \s+ '**' (.+?) '**' / {
+			@items.push: [~$0, $line];
+		}
+		elsif @items && $line.trim && $line !~~ / ^ \s* '*' \s / {
+			@items.tail[1] ~= ' ' ~ $line.trim;
+		}
+	}
+	@items.map({ .[0] => .[1] }).List;
+}
+
+#| The Pod's disclosure items: label => text, one per =item paragraph.
+sub pod-items(Str:D $region --> List:D) {
+	my @items;
+	my Bool $in-item = False;
+	for $region.lines -> $line {
+		if $line ~~ / ^ '=item' \s+ 'B<' (<-[>]>+) '>' / {
+			@items.push: [~$0, $line];
+			$in-item = True;
+		}
+		elsif !$line.trim || $line.starts-with('=') {
+			$in-item = False;
+		}
+		elsif $in-item {
+			@items.tail[1] ~= ' ' ~ $line.trim;
+		}
+	}
+	@items.map({ .[0] => .[1] }).List;
+}
+
+subtest 'the name matcher' => {
+	plan 5;
+	ok names('LGPL: libvips, GLib, cairo, pango.', 'GLib'), 'a name between commas';
+	ok names('the GCC runtime (C<libstdc++>, C<libgcc_s>)', 'libstdc++'),
+		'a name ending in punctuation, inside a formatting code';
+	ok names('runtime (`libgomp`, the OpenMP', 'libgomp'), 'a name in Markdown code';
+	nok names('LGPL: libpango and libglib.', 'pango'), 'not a name inside a longer one';
+	nok names('LGPL: GLibc', 'GLib'), 'nor a prefix of one';
+};
+
+ok $list.e, 'scripts/ci/disclosed.json exists';
+
+my %platforms;
+lives-ok {
+	%platforms = Rakudo::Internals::JSON.from-json($list.slurp)<platforms>;
+	die 'no "platforms" object' unless %platforms;
+	for %platforms.kv -> $platform, %entry {
+		die "$platform has no readme label" unless %entry<readme> ~~ Str && %entry<readme>.trim;
+		die "$platform has no packages" unless %entry<packages> ~~ Associative;
+		for %entry<packages>.kv -> $package, $shown {
+			die "$platform / $package has no README name" unless $shown ~~ Str && $shown.trim;
+		}
+	}
+}, 'it parses: every platform has a README label, and every package the name the README gives it';
+
+# One entry per prebuilt pack, and no other: the packs are the archives
+# resources/checksums.txt pins, vips-<platform>.tar.gz / vips-<platform>.zip.
+my @packs = $checksum.lines.grep({ .trim && !.starts-with('#') }).map({ .words[1] }).sort;
+my @slugs = @packs.map({ .subst(/^ 'vips-' /, '').subst(/ '.' ['tar.gz' || 'zip'] $ /, '') });
+is-deeply %platforms.keys.sort.List, @slugs.List,
+	"one disclosure entry per prebuilt pack ({@slugs.join(', ')})";
+
+for ('README.md', $readme, &readme-items), ('doc/Readme.rakudoc', $pod, &pod-items)
+		-> ($what, $file, &items-of) {
+	subtest "$what names every disclosed package" => {
+		plan 2 * %platforms.elems;
+		my $region = disclosure-region($file.slurp, $what);
+		my @items = $region ?? items-of($region) !! ();
+		diag $region.exception.message unless $region;
+		for %platforms.sort(*.key) -> (:key($platform), :value(%entry)) {
+			my @mine = @items.grep({ .key.contains(%entry<readme>) });
+			is @mine.elems, 1,
+				"one disclosure item for $platform (its label names '%entry<readme>')";
+			my Str $text = @mine ?? @mine.head.value !! '';
+			my @missing = %entry<packages>.sort(*.key).grep({ !names($text, .value) })
+				.map({ "{.value} ({.key})" });
+			ok !@missing, "it names every package disclosed for $platform"
+				or diag "not named: {@missing.join(', ')}";
+		}
+	};
+}

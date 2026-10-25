@@ -1,0 +1,166 @@
+use Test;
+
+# Build.rakumod is the dist's `build:` script, not a module in `provides`,
+# so it is EVALFILE'd at BEGIN time to bring the class into scope (the
+# same convention as Notcurses-Native's Build tests).
+BEGIN EVALFILE $*PROGRAM.parent.parent.child('Build.rakumod').absolute;
+
+# The pure parts of the varargs-shim build: which functions the C source
+# defines, what an `nm` listing says the compiled DLL exports, where the
+# libraries and the toolchain are found, and the stage cleanup. The
+# compile itself runs at install time (zef runs Build); these pin the
+# decisions it makes so a wrong one fails here rather than as a
+# "Cannot locate symbol" in an application.
+
+plan 8;
+
+my IO::Path $dist = $*PROGRAM.parent.parent;
+my Str $source = $dist.add('src/vips_native_shim.c').slurp;
+my Str $ffi    = $dist.add('lib/Vips/Native/FFI.rakumod').slurp;
+
+my IO::Path $root = $*TMPDIR.add("vips-native-build-shim-{$*PID}-{now.Int}");
+$root.mkdir;
+END { Build::remove-tree($root) if $root.e }
+
+sub fixture(Str $name, *@files --> IO::Path) {
+	my IO::Path $dir = $root.add($name);
+	$dir.mkdir;
+	for @files -> $f {
+		my $path = $dir.add($f);
+		$path.parent.mkdir;
+		$path.spurt('');
+	}
+	$dir;
+}
+
+# A directory link the OS follows, without privilege on any platform: a
+# junction on Windows, a symlink elsewhere.
+sub dir-link(IO::Path:D $target, IO::Path:D $link) {
+	if $*DISTRO.is-win {
+		my $p = run 'cmd.exe', '/d', '/c', 'mklink', '/J', $link.absolute,
+			$target.absolute, :out, :err;
+		$p.out.slurp(:close);
+		my $err = $p.err.slurp(:close);
+		die "mklink /J failed for $link: $err" unless $p.exitcode == 0;
+	}
+	else {
+		$target.symlink($link);
+	}
+}
+
+subtest 'shim-functions: the functions the source defines' => {
+	plan 4;
+	my @defined = Build::shim-functions($source);
+	ok @defined.elems >= 12, "found them all ({@defined.elems})";
+	ok @defined.grep('vips_shim_image_new_from_buffer_strict'),
+		'including the newest';
+	ok @defined.grep('vips_shim_free'), 'and the release function';
+	nok Build::shim-functions(" * see vips_shim_resize(in, out) above\n").elems,
+		'a name in a comment is not a definition';
+};
+
+subtest 'every shim function FFI binds is one the source defines' => {
+	# The drift this catches: a binding added in Raku for a C function
+	# that was never written, or one renamed on one side only. Either
+	# way the shim compiles cleanly and the binding dies at first call.
+	my %defined is Set = Build::shim-functions($source);
+	my @bound = (
+		|$ffi.comb(/ "symbol('" <( vips_shim_\w+ )> "')" /),
+		|$ffi.comb(/ 'sub' \s+ <( vips_shim_\w+ )> \s* '(' /),
+	).unique.sort;
+	plan @bound.elems + 1;
+	ok @bound.elems >= 12, "FFI binds {@bound.elems} shim functions";
+	for @bound -> $name {
+		ok %defined{$name}, "$name is defined in src/vips_native_shim.c";
+	}
+};
+
+my Str $listing = q:to/NM/;
+    0000000263e01000 T DllMain
+    0000000263e01450 T vips_shim_addalpha
+    0000000263e01470 T _vips_shim_colourspace
+    0000000263e014a0 T vips_shim_embed
+    0000000263e09000 D vips_shim_not_a_function
+                     U vips_shim_undefined_import
+    0000000263e01500 t vips_shim_static_helper
+    NM
+
+subtest 'exported-shim-symbols: reading an nm listing' => {
+	plan 1;
+	is-deeply Build::exported-shim-symbols($listing),
+		('vips_shim_addalpha', 'vips_shim_colourspace', 'vips_shim_embed'),
+		'global text symbols only, a leading underscore dropped';
+};
+
+subtest 'missing-exports: a complete shim, and one that is not' => {
+	plan 3;
+	my $c-src = "int\nvips_shim_addalpha(void)\n\{ return 0; }\n"
+			  ~ "int\nvips_shim_embed(void)\n\{ return 0; }\n";
+	is-deeply Build::missing-exports($c-src, $listing), (),
+		'every defined function exported: nothing missing';
+	is-deeply Build::missing-exports($c-src ~ "int\nvips_shim_resize(void)\n\{ return 0; }\n",
+		$listing), ('vips_shim_resize',), 'one not exported: named';
+	is-deeply Build::missing-exports($c-src, ''), ('vips_shim_addalpha', 'vips_shim_embed'),
+		'an empty listing (a link that produced nothing) misses them all';
+};
+
+subtest 'find-file: the DLLs to link against' => {
+	plan 5;
+	my $stage  = fixture('stage', 'libvips-42.dll', 'libvips-cpp-42.dll', 'libvips_shim.dll');
+	my $system = fixture('system', 'libglib-2.0-0.dll', 'libvips-42.dll');
+	my $decoy  = fixture('decoy');
+	$decoy.add('libglib-2.0-0.dll').mkdir;    # a directory, not a DLL
+	my $vips = / ^ 'libvips-' \d+ '.dll' $ /;
+	my $glib = / ^ 'libglib-2.0-' \d+ '.dll' $ /;
+
+	is Build::find-file(($stage, $system), $vips), $stage.add('libvips-42.dll'),
+		'the first directory that has it wins';
+	is Build::find-file(($stage, $system), $glib), $system.add('libglib-2.0-0.dll'),
+		'and a later one is searched when the first does not';
+	is Build::find-file(($decoy, $system), $glib), $system.add('libglib-2.0-0.dll'),
+		'a directory with the right name is not a DLL';
+	nok Build::find-file(($root.add('missing'), $decoy), $vips).defined,
+		'missing directories are skipped, and nothing found is undefined';
+	my $cpp-only = fixture('cpp-only', 'libvips-cpp-42.dll');
+	nok Build::find-file(($cpp-only,), $vips).defined,
+		'the C++ binding is never taken for libvips';
+};
+
+subtest 'find-executable and find-c-compiler: the toolchain' => {
+	plan 6;
+	my $x = $*DISTRO.is-win ?? '.exe' !! '';
+	my $tools = fixture('tools', "gcc$x", "clang$x", "nm$x");
+	my $more  = fixture('more', "cc$x");
+
+	is Build::find-executable('nm', ($tools,)), $tools.add("nm$x"),
+		'an executable by name' ~ ($x ?? ', with .exe' !! '');
+	nok Build::find-executable('ld', ($tools,)).defined, 'and none when it is not there';
+	is Build::find-c-compiler(Str, ($tools, $more)), $more.add("cc$x"),
+		'cc first, wherever on the path it is';
+	is Build::find-c-compiler(Str, ($tools,)), $tools.add("gcc$x"),
+		'then gcc';
+	is Build::find-c-compiler($tools.add("clang$x").absolute, ($more,)),
+		$tools.add("clang$x").absolute.IO, 'an override that is a path is used as it is';
+	is Build::find-c-compiler('clang', ($tools, $more)), $tools.add("clang$x"),
+		'an override that is a name is looked up';
+};
+
+subtest 'path-dirs: PATH, however Windows spells it' => {
+	plan 2;
+	my Str $key = %*ENV.keys.first({ .fc eq 'path' }) // 'PATH';
+	my @expected = (%*ENV{$key} // '').split($*DISTRO.is-win ?? ';' !! ':').grep(*.chars);
+	my @got = Build::path-dirs();
+	is @got.elems, @expected.elems, 'one directory per entry';
+	is-deeply @got.map(*.Str).List, @expected.List, 'in order';
+};
+
+subtest 'remove-tree: a stage goes, and nothing outside it' => {
+	plan 3;
+	my $outside = fixture('outside', 'keep.txt');
+	my $stage = fixture('old-stage', 'lib/libvips-42.dll', 'lib/vips-modules-8.15/x.dll');
+	dir-link($outside, $stage.add('lib').add('link-out'));
+	Build::remove-tree($stage);
+	nok $stage.e, 'the tree is gone';
+	ok $outside.add('keep.txt').e, 'what a link inside it pointed at is not';
+	ok $outside.d, 'nor is the directory it pointed at';
+};

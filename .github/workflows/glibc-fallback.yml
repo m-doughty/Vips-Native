@@ -26,7 +26,12 @@ on:
 
 jobs:
   ubuntu-20-04-fallback:
-    name: Ubuntu 20.04 (glibc 2.31) → system-libvips fallback
+    name: Ubuntu 20.04 (glibc 2.31) → system-libvips fallback / ${{ matrix.raku-version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # 2026.07: last legacy-frontend release. 2026.09: RakuAST is the default.
+        raku-version: ['2026.07', '2026.09']
     runs-on: ubuntu-latest
     container:
       image: ubuntu:20.04
@@ -58,7 +63,7 @@ jobs:
 
       - uses: Raku/setup-raku@v1
         with:
-          raku-version: 'latest'
+          raku-version: ${{ matrix.raku-version }}
 
       - name: Install module (capture build log)
         run: |

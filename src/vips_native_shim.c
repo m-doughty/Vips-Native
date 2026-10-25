@@ -144,6 +144,16 @@ vips_shim_image_new_from_buffer(const void *buf, size_t len)
     return vips_image_new_from_buffer(buf, len, "", NULL);
 }
 
+/* Strict in-memory decode: fail on loader warnings rather than
+ * accepting partially-decoded/corrupt input. This is a separate symbol
+ * so the existing vips_shim_image_new_from_buffer(buf,len) ABI remains
+ * unchanged for already-bound default callers. */
+VipsImage *
+vips_shim_image_new_from_buffer_strict(const void *buf, size_t len)
+{
+    return vips_image_new_from_buffer(buf, len, "[fail_on=warning]", NULL);
+}
+
 /* Convert to a target colourspace (pass a VipsInterpretation enum
  * value, e.g. VIPS_INTERPRETATION_sRGB = 22). Normalises greyscale /
  * CMYK / 16-bit sources to 8-bit sRGB; any alpha band passes through

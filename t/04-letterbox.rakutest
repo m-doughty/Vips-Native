@@ -25,21 +25,21 @@ constant LARGER  = 128;
 plan 13;
 
 sub buf-rgb($buf, Int $i) {
-    ($buf[$i], $buf[$i+1], $buf[$i+2]).List
+	($buf[$i], $buf[$i+1], $buf[$i+2]).List
 }
 
 sub all-white-row($buf, Int $row, Int $size --> Bool) {
-    (^$size).map(-> $x {
-        my $i = ($row * $size + $x) * 3;
-        $buf[$i] == 255 && $buf[$i+1] == 255 && $buf[$i+2] == 255
-    }).all.so
+	(^$size).map(-> $x {
+		my $i = ($row * $size + $x) * 3;
+		$buf[$i] == 255 && $buf[$i+1] == 255 && $buf[$i+2] == 255
+	}).all.so
 }
 
 sub all-row-rgb($buf, Int $row, Int $size, Int $r, Int $g, Int $b --> Bool) {
-    (^$size).map(-> $x {
-        my $i = ($row * $size + $x) * 3;
-        $buf[$i] == $r && $buf[$i+1] == $g && $buf[$i+2] == $b
-    }).all.so
+	(^$size).map(-> $x {
+		my $i = ($row * $size + $x) * 3;
+		$buf[$i] == $r && $buf[$i+1] == $g && $buf[$i+2] == $b
+	}).all.so
 }
 
 # 1-2: Buffer length always matches size×size×3 -----------------------------
@@ -76,7 +76,7 @@ ok all-row-rgb($green, 0, SIZE, 0,   255, 0  ), 'top row green with @bg=(0,255,0
 
 # Pixel (10, 0) → byte offset 30. Pixel (10, 1) → byte offset 30 + SIZE*3.
 ok $small[30 + SIZE*3 + 2].defined,
-    "row stride {SIZE*3} bytes addressable in a {SIZE*SIZE*3}-byte buffer";
+	"row stride {SIZE*3} bytes addressable in a {SIZE*SIZE*3}-byte buffer";
 
 # 11: missing file fails cleanly ------------------------------------------
 

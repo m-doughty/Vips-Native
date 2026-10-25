@@ -1,15 +1,15 @@
 #!/usr/bin/env raku
 unit sub MAIN (
-    Str :$in,                      # --in=path/to/input.png
-    Str :$out,                     # --out=path/to/output.png
-    Int :$width = 180,             # --width=180 (default: 180)
-    Int :$height = 180             # --height=180 (default: 180)
+	Str :$in,                      # --in=path/to/input.png
+	Str :$out,                     # --out=path/to/output.png
+	Int :$width = 180,             # --width=180 (default: 180)
+	Int :$height = 180             # --height=180 (default: 180)
 );
 
 use Vips::Native;
 
 die "Usage: vips_smart_resize --in=/path/to/image.png --out=/path/to/save.png --width=180 --height=180"
-    unless $in.defined && $out.defined && $width.defined && $height.defined;
+	unless $in.defined && $out.defined && $width.defined && $height.defined;
 
 say "📸 Resizing image:";
 say "  Input:  $in";
@@ -17,16 +17,16 @@ say "  Output: $out";
 say "  Size:   {$width}x{$height}";
 
 try {
-    if smart-resize($in, $out, $width, $height) {
-        say "✅ Resize successful!";
-    } else {
-        die "❌ Resize failed for unknown reason (must use absolute paths).";
-    }
-    CATCH {
-        default {
-            note "❌ Error: $_";
-            exit 1;
-        }
-    }
+	if smart-resize($in, $out, $width, $height) {
+		say "✅ Resize successful!";
+	} else {
+		die "❌ Resize failed for unknown reason (must use absolute paths).";
+	}
+	CATCH {
+		default {
+			note "❌ Error: $_";
+			exit 1;
+		}
+	}
 }
 
