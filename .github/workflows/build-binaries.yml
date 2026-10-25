@@ -275,6 +275,10 @@ jobs:
     # hang under xtajit64 emulation). Cap the job so a stuck runner
     # fails in an hour rather than burning the GitHub default 6h.
     timeout-minutes: 60
+    # Python on Windows writes stdout in cp1252, which has no ✅ or ❌: the
+    # kit and archive checks would die printing their verdicts.
+    env:
+      PYTHONUTF8: '1'
     defaults:
       run:
         shell: bash

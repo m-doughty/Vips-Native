@@ -1486,6 +1486,12 @@ def write_notices(bundle, lines):
 
 
 def main():
+    # A Windows runner gives python a cp1252 stdout and stderr, which have
+    # no ✅ or ❌: printing one raises, and a refusal's reason is lost behind
+    # the UnicodeEncodeError. Every runner's log reads UTF-8.
+    for stream in (sys.stdout, sys.stderr):
+        stream.reconfigure(encoding='utf-8')
+
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     sub = ap.add_subparsers(dest='source', required=True)
 

@@ -82,3 +82,7 @@ __pycache__/
 
 # === Package ===
 Vips-Native-*
+
+# Third-party licence texts ship byte for byte, whatever their names (rsvg's
+# COPYING.LIB matched *.lib above). Last match wins, so this stays last.
+!scripts/ci/license-texts/**

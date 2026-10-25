@@ -32,7 +32,7 @@ use Test;
 # EVALFILE'd for Build::remove-tree, as t/10 and t/11 do.
 BEGIN EVALFILE $*PROGRAM.parent.parent.child('Build.rakumod').absolute;
 
-plan 4;
+plan 5;
 
 my IO::Path $dist   = $*PROGRAM.parent.parent;
 my IO::Path $script = $dist.add('scripts').add('ci').add('third-party.py');
@@ -49,9 +49,21 @@ my constant $LERC-SOURCE = ('https://github.com/Esri/lerc/archive/v4.2.0.tar.gz'
 my constant $FREETYPE-SOURCE = ('https://download.savannah.gnu.org/releases/freetype/freetype-2.14.3.tar.gz',
 	'e61b31ab26358b946e767ed7eb7f4bb2e507da1cfefeb7a8861ace7fd5c899a1');
 
+#| Python as a Windows runner starts it: stdout and stderr in cp1252, the
+#| ANSI code page, which has no ✅ or ❌. Forced, so every OS checks it.
+my constant $CP1252-CONSOLE = q:to/PY/;
+import io, runpy, sys
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='cp1252', line_buffering=True)
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='cp1252', line_buffering=True)
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name='__main__')
+PY
+
 #| Run third-party.py (or the copy at $with); (exit code, stdout, stderr).
-sub kit(*@args, IO::Path :$with = $script --> List) {
-	my $proc = run $python, '-I', '-B', $with.absolute, |@args, :out, :err;
+#| :cp1252 runs it behind a Windows runner's console encoding.
+sub kit(*@args, IO::Path :$with = $script, Bool :$cp1252 --> List) {
+	my @python = $cp1252 ?? ($python, '-I', '-B', '-c', $CP1252-CONSOLE) !! ($python, '-I', '-B');
+	my $proc = run |@python, $with.absolute, |@args, :out, :err;
 	my Str $out = $proc.out.slurp(:close);
 	my Str $err = $proc.err.slurp(:close);
 	die "could not run $python ($err) -- install python3 or set VIPS_NATIVE_PYTHON"
@@ -438,9 +450,9 @@ sub mxe-fixture(Str $name, %components, :&tamper, :$ref = 'v8.18.7' --> IO::Path
 }
 
 sub mxe-kit(IO::Path $dir, %disclosed = %WINDOWS-DISCLOSED, Str :$manifest,
-		Str :$arch = 'x86_64' --> List) {
+		Str :$arch = 'x86_64', Bool :$cp1252 --> List) {
 	$dir.add('disclosed.json').spurt(json(|%disclosed));
-	kit 'mxe', '--zip-root', $dir.add('vips-dev-8.18').absolute,
+	kit :$cp1252, 'mxe', '--zip-root', $dir.add('vips-dev-8.18').absolute,
 		'--zip-name', "vips-dev-{$arch eq 'x86_64' ?? 'x64' !! $arch}-all-8.18.7.zip",
 		'--release', 'v8.18.7',
 		'--bundle', $dir.add('bundle').absolute, '--pack', "vips-windows-$arch.zip",
@@ -558,4 +570,22 @@ subtest 'mxe: manifests that must stop a lane' => {
 	my ($code, $, $err) = mxe-kit($dir, :manifest($dir.add('nowhere/manifest.json').absolute));
 	is $code, 1, 'no manifest at all';
 	ok $err.contains('no licence-text manifest at'), '  and says so' or diag $err;
+};
+
+subtest 'mxe: a Windows runner\'s console' => {
+	plan 4;
+	# python on a Windows runner writes cp1252, which has no ✅ or ❌;
+	# printing one killed the first r12 Windows lane.
+	my ($code, $out, $err) = mxe-kit(mxe-fixture('mxe-cp1252', mxe-components()), :cp1252);
+	is $code, 0, 'the kit is written' or diag $err;
+	ok $out.contains('✅ every copyleft package in the windows-x86_64 pack is disclosed'),
+		'and says so, in UTF-8' or diag $out;
+
+	my %c = mxe-components();
+	%c<glib>:delete;
+	($code, $, $err) = mxe-kit(mxe-fixture('mxe-cp1252-refused', %c), :cp1252);
+	is $code, 1, 'a refusal still stops the lane';
+	ok $err.contains('❌') && $err.contains('glib (libglib-2.0-0.dll) is in the pack')
+		&& !$err.contains('UnicodeEncodeError'),
+		'  with its reason, not an encoding error' or diag $err;
 };

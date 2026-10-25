@@ -1,0 +1,48 @@
+use Test;
+
+# Each Windows pack ships the licence texts that
+# scripts/ci/license-texts/windows/manifest.json lists, copied from this
+# checkout. A text the manifest names but the repository lacks would
+# otherwise surface only when the Windows build lanes run, deep into a
+# binary release; here it fails on every push. (rsvg's COPYING.LIB once
+# matched .gitignore's *.lib and never reached the repository.)
+#
+# This checks that each text is present and not empty. The build checks
+# its bytes against the manifest's sha256, which a stock Rakudo cannot
+# compute.
+
+plan 4;
+
+my IO::Path $texts    = $*PROGRAM.parent.parent.add('scripts').add('ci').add('license-texts').add('windows');
+my IO::Path $manifest = $texts.add('manifest.json');
+
+ok $manifest.f, 'scripts/ci/license-texts/windows/manifest.json exists';
+
+my %components;
+lives-ok {
+	%components = Rakudo::Internals::JSON.from-json($manifest.slurp)<components>;
+	die 'no "components" object' unless %components;
+}, 'it parses, and lists components';
+
+my Int $listed = 0;
+my @problems;
+for %components.sort(*.key) -> $component {
+	for @($component.value<files> // []) -> %file {
+		$listed++;
+		my Str $path = %file<path> // '';
+		if !$path || $path.starts-with('/') || $path.split('/').grep(* eq '..') {
+			@problems.push: "{$component.key}: '$path' is not a path inside the manifest's directory";
+			next;
+		}
+		my IO::Path $text = $texts.add($path);
+		if !$text.f {
+			@problems.push: "{$component.key}: $path is not in the repository";
+		}
+		elsif !$text.s {
+			@problems.push: "{$component.key}: $path is empty";
+		}
+	}
+}
+
+cmp-ok $listed, '>', 0, 'the manifest lists licence texts';
+ok !@problems, 'every text it lists is in the repository' or diag @problems.join("\n");
